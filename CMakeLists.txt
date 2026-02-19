@@ -21,6 +21,12 @@ pkg_check_modules(GBM REQUIRED gbm)
 pkg_check_modules(LIBCAMERA REQUIRED libcamera)
 pkg_check_modules(GPIOD REQUIRED libgpiod)
 
+# Set compile definitions for optional libraries
+add_definitions(-DLIBCAMERA_AVAILABLE)
+if(GPIOD_FOUND)
+    add_definitions(-DLIBGPIOD_AVAILABLE)
+endif()
+
 find_library(TURBOJPEG_LIB turbojpeg REQUIRED)
 find_library(I2C_LIB i2c)
 
