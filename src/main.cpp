@@ -29,6 +29,7 @@
 #include <chrono>
 #include <thread>
 #include <atomic>
+#include <ctime>
 #include <sys/stat.h>
 #include <memory>
 
@@ -349,6 +350,34 @@ int main(int argc, char* argv[]) {
         // Scene updates
         if (current_scene == Scene::Camera && app.has_sensors()) {
             camera_scene.update(*app.camera(), *app.sensors());
+        }
+
+        // Apply runtime camera look settings from config
+        app.camera()->set_white_balance(config.get().camera.wb_mode);
+
+        // Clock/status overlay update (once per second)
+        static time_t last_clock = 0;
+        time_t now = time(nullptr);
+        if (now != last_clock) {
+            last_clock = now;
+            if (ui_INFOSONSCREEN) {
+                if (config.get().display.show_clock) {
+                    lv_obj_clear_flag(ui_INFOSONSCREEN, LV_OBJ_FLAG_HIDDEN);
+                    struct tm* t = localtime(&now);
+                    if (t) {
+                        char buf[32];
+                        snprintf(buf, sizeof(buf), "%02d:%02d", t->tm_hour, t->tm_min);
+                        lv_obj_t* label = lv_obj_get_child(ui_INFOSONSCREEN, 0);
+                        if (!label || !lv_obj_check_type(label, &lv_label_class)) {
+                            label = lv_label_create(ui_INFOSONSCREEN);
+                            lv_obj_center(label);
+                        }
+                        lv_label_set_text(label, buf);
+                    }
+                } else {
+                    lv_obj_add_flag(ui_INFOSONSCREEN, LV_OBJ_FLAG_HIDDEN);
+                }
+            }
         }
 
         // Power management update (optional hardware)

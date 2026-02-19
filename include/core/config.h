@@ -23,6 +23,7 @@ struct CameraSettings {
 struct DisplaySettings {
     int brightness     = 128;     // 0-255
     int standby_sec    = 10;      // 10,30,60,0(never)
+    bool show_clock    = true;    // show clock/status overlay
 };
 
 struct AppConfig {

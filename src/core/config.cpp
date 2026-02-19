@@ -46,6 +46,7 @@ bool ConfigManager::load(const std::string& path) {
             auto& d = j["display"];
             if (d.contains("brightness"))    config_.display.brightness = d["brightness"];
             if (d.contains("standby_sec"))   config_.display.standby_sec = d["standby_sec"];
+            if (d.contains("show_clock"))    config_.display.show_clock = d["show_clock"];
         }
         if (j.contains("photo_dir")) {
             config_.photo_dir = j["photo_dir"].get<std::string>();
@@ -72,6 +73,7 @@ bool ConfigManager::save() {
     j["camera"]["colour_temp"]   = config_.camera.colour_temp;
     j["display"]["brightness"]   = config_.display.brightness;
     j["display"]["standby_sec"]  = config_.display.standby_sec;
+    j["display"]["show_clock"]   = config_.display.show_clock;
     j["photo_dir"]               = config_.photo_dir;
     j["version"]                 = config_.version;
 

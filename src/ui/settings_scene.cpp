@@ -23,6 +23,9 @@ static lv_obj_t* brightness_slider = nullptr;
 static lv_obj_t* standby_dropdown = nullptr;
 static lv_obj_t* used_label = nullptr;
 static lv_obj_t* free_label = nullptr;
+static lv_obj_t* wb_dropdown = nullptr;
+static lv_obj_t* colour_slider = nullptr;
+static lv_obj_t* clock_switch = nullptr;
 
 static void brightness_changed_cb(lv_event_t* e) {
     int val = lv_slider_get_value(static_cast<lv_obj_t*>(lv_event_get_target(e)));
@@ -42,6 +45,24 @@ static void standby_changed_cb(lv_event_t* e) {
     int values[] = {10, 30, 60, 0};
     auto& cfg = ConfigManager::instance().get();
     cfg.display.standby_sec = values[sel];
+}
+
+static void wb_changed_cb(lv_event_t* e) {
+    uint16_t sel = lv_dropdown_get_selected(static_cast<lv_obj_t*>(lv_event_get_target(e)));
+    auto& cfg = ConfigManager::instance().get();
+    cfg.camera.wb_mode = static_cast<int>(sel);
+}
+
+static void colour_changed_cb(lv_event_t* e) {
+    int val = lv_slider_get_value(static_cast<lv_obj_t*>(lv_event_get_target(e)));
+    auto& cfg = ConfigManager::instance().get();
+    cfg.camera.colour_temp = static_cast<float>(val) / 100.0f;
+}
+
+static void clock_changed_cb(lv_event_t* e) {
+    auto* sw = static_cast<lv_obj_t*>(lv_event_get_target(e));
+    auto& cfg = ConfigManager::instance().get();
+    cfg.display.show_clock = lv_obj_has_state(sw, LV_STATE_CHECKED);
 }
 
 static void reboot_cb(lv_event_t* e) {
@@ -173,6 +194,66 @@ void SettingsScene::create_settings_ui() {
     else if (cfg.display.standby_sec == 0) standby_idx = 3;
     lv_dropdown_set_selected(standby_dropdown, standby_idx);
     lv_obj_add_event_cb(standby_dropdown, standby_changed_cb, LV_EVENT_VALUE_CHANGED, nullptr);
+
+    // Clock overlay toggle
+    lv_obj_t* clock_row = lv_obj_create(settings_list);
+    lv_obj_remove_style_all(clock_row);
+    lv_obj_set_size(clock_row, LV_PCT(100), 50);
+    lv_obj_set_style_pad_all(clock_row, 5, 0);
+
+    lv_obj_t* clock_label = lv_label_create(clock_row);
+    lv_label_set_text(clock_label, "Clock Overlay");
+    lv_obj_set_style_text_color(clock_label, lv_color_hex(0xB4B4B4), 0);
+    lv_obj_set_style_text_font(clock_label, &ui_font_Font1, 0);
+    lv_obj_align(clock_label, LV_ALIGN_LEFT_MID, 0, 0);
+
+    clock_switch = lv_switch_create(clock_row);
+    lv_obj_align(clock_switch, LV_ALIGN_RIGHT_MID, 0, 0);
+    if (cfg.display.show_clock) lv_obj_add_state(clock_switch, LV_STATE_CHECKED);
+    lv_obj_add_event_cb(clock_switch, clock_changed_cb, LV_EVENT_VALUE_CHANGED, nullptr);
+
+    // ═══ CAMERA LOOK SECTION ═══
+    lv_obj_t* hdr_look = lv_list_add_text(settings_list, "CAMERA LOOK");
+    lv_obj_set_style_text_color(hdr_look, lv_color_hex(0x00CA00), 0);
+    lv_obj_set_style_text_font(hdr_look, &ui_font_Font2, 0);
+
+    // White balance/filter mode
+    lv_obj_t* wb_row = lv_obj_create(settings_list);
+    lv_obj_remove_style_all(wb_row);
+    lv_obj_set_size(wb_row, LV_PCT(100), 50);
+    lv_obj_set_style_pad_all(wb_row, 5, 0);
+
+    lv_obj_t* wb_label = lv_label_create(wb_row);
+    lv_label_set_text(wb_label, "Filter (WB)");
+    lv_obj_set_style_text_color(wb_label, lv_color_hex(0xB4B4B4), 0);
+    lv_obj_set_style_text_font(wb_label, &ui_font_Font1, 0);
+    lv_obj_align(wb_label, LV_ALIGN_LEFT_MID, 0, 0);
+
+    wb_dropdown = lv_dropdown_create(wb_row);
+    lv_dropdown_set_options(wb_dropdown, "Auto\nDaylight\nCloudy\nTungsten");
+    lv_obj_set_width(wb_dropdown, 160);
+    lv_obj_align(wb_dropdown, LV_ALIGN_RIGHT_MID, 0, 0);
+    lv_dropdown_set_selected(wb_dropdown, static_cast<uint16_t>(cfg.camera.wb_mode));
+    lv_obj_add_event_cb(wb_dropdown, wb_changed_cb, LV_EVENT_VALUE_CHANGED, nullptr);
+
+    // Colour strength slider
+    lv_obj_t* col_row = lv_obj_create(settings_list);
+    lv_obj_remove_style_all(col_row);
+    lv_obj_set_size(col_row, LV_PCT(100), 50);
+    lv_obj_set_style_pad_all(col_row, 5, 0);
+
+    lv_obj_t* col_label = lv_label_create(col_row);
+    lv_label_set_text(col_label, "Filter Strength");
+    lv_obj_set_style_text_color(col_label, lv_color_hex(0xB4B4B4), 0);
+    lv_obj_set_style_text_font(col_label, &ui_font_Font1, 0);
+    lv_obj_align(col_label, LV_ALIGN_LEFT_MID, 0, 0);
+
+    colour_slider = lv_slider_create(col_row);
+    lv_obj_set_width(colour_slider, 200);
+    lv_obj_align(colour_slider, LV_ALIGN_RIGHT_MID, 0, 0);
+    lv_slider_set_range(colour_slider, 0, 100);
+    lv_slider_set_value(colour_slider, static_cast<int>(cfg.camera.colour_temp * 100.0f), LV_ANIM_OFF);
+    lv_obj_add_event_cb(colour_slider, colour_changed_cb, LV_EVENT_VALUE_CHANGED, nullptr);
 
     // ═══ STORAGE SECTION ═══
     lv_obj_t* hdr_storage = lv_list_add_text(settings_list, "STORAGE");
