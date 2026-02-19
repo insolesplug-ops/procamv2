@@ -182,10 +182,10 @@ crtc_found:
     }
 
     // Set mode on CRTC using legacy API as initial setup
-    // We'll create a black framebuffer for the primary plane
-    // Use PORTRAIT dimensions (480x800) not landscape mode dimensions
+    // Primary framebuffer MUST match the mode dimensions (landscape)
+    // even though we'll display portrait via plane rotation
     DrmPlane primary;
-    if (!create_dumb_buffer(primary, DISPLAY_W, DISPLAY_H, 32)) {
+    if (!create_dumb_buffer(primary, mode.hdisplay, mode.vdisplay, 32)) {
         fprintf(stderr, "[DRM] Failed to create primary dumb buffer\n");
         drmModeFreeConnector(conn);
         drmModeFreeResources(res);
@@ -274,11 +274,12 @@ bool DrmDisplay::setup_ui_plane() {
         ui_plane_.id = overlay_plane_id;
         fprintf(stderr, "[DRM] UI overlay plane: %u\n", overlay_plane_id);
 
-        // Set overlay plane
+        // Set overlay plane - use physical display dimensions
+        // (rotation handled by display_lcd_rotate=1 in config.txt)
         if (drmModeSetPlane(drm_fd_, overlay_plane_id, crtc_id_,
                             ui_plane_.fb_id, 0,
-                            0, 0, DISPLAY_W, DISPLAY_H,    // dst (screen) - Portrait
-                            0, 0, DISPLAY_W << 16, DISPLAY_H << 16   // src (buffer)
+                            0, 0, DISPLAY_PHYS_W, DISPLAY_PHYS_H,    // dst: physical screen
+                            0, 0, DISPLAY_W << 16, DISPLAY_H << 16   // src: portrait buffer
                            ) != 0) {
             fprintf(stderr, "[DRM] drmModeSetPlane for UI failed: %s (non-fatal, using primary)\n",
                     strerror(errno));
@@ -352,12 +353,12 @@ bool DrmDisplay::set_camera_dmabuf(int dmabuf_fd, int width, int height,
         return false;
     }
 
-    // Set on primary plane
+    // Set on primary plane - use physical display dimensions
     uint32_t primary_plane_id = find_plane_for_layer(0);
     if (primary_plane_id) {
         drmModeSetPlane(drm_fd_, primary_plane_id, crtc_id_,
                         camera_fb_id_, 0,
-                        0, 0, DISPLAY_W, DISPLAY_H,
+                        0, 0, DISPLAY_PHYS_W, DISPLAY_PHYS_H,   // physical screen
                         0, 0, width << 16, height << 16);
     } else {
         // Fallback: set on CRTC directly
@@ -376,7 +377,7 @@ bool DrmDisplay::commit() {
     if (ui_plane_.id) {
         drmModeSetPlane(drm_fd_, ui_plane_.id, crtc_id_,
                         ui_plane_.fb_id, 0,
-                        0, 0, DISPLAY_W, DISPLAY_H,
+                        0, 0, DISPLAY_PHYS_W, DISPLAY_PHYS_H,   // physical screen
                         0, 0, DISPLAY_W << 16, DISPLAY_H << 16);
     }
 
