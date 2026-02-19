@@ -243,14 +243,15 @@ int main(int argc, char* argv[]) {
 
     PhotoManager photo_mgr;
     if (app.has_gpio()) {
-        photo_mgr.init(*app.camera(), *app.gpio(), 
-                      app.has_sensors() ? *app.sensors() : nullptr);
+        I2CSensors* sensors_ptr = app.has_sensors() ? app.sensors() : nullptr;
+        photo_mgr.init(*app.camera(), *app.gpio(), sensors_ptr);
     }
 
     PowerManager power;
     if (app.has_gpio() && app.has_sensors()) {
+        TouchInput* touch_ptr = app.touch();
         power.init(*app.display(), *app.camera(), 
-                  app.touch() ? *app.touch() : nullptr,
+                  touch_ptr,
                   *app.gpio(), *app.sensors(), *app.lvgl());
         power.set_timeout(config.get().display.standby_sec);
     } else {
