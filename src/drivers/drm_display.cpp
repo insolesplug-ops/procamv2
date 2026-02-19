@@ -298,29 +298,10 @@ bool DrmDisplay::setup_ui_plane() {
     // Clear to transparent
     memset(ui_plane_.map, 0, ui_plane_.size);
 
-    // Find overlay plane
-    uint32_t overlay_plane_id = find_plane_for_layer(1);
-    if (overlay_plane_id) {
-        ui_plane_.id = overlay_plane_id;
-        fprintf(stderr, "[DRM] UI overlay plane: %u\n", overlay_plane_id);
-
-        // Keep UI above primary where supported
-        set_plane_zpos_if_available(drm_fd_, overlay_plane_id, 10);
-
-        // Set overlay plane - use physical display dimensions
-        // (rotation handled by display_lcd_rotate=1 in config.txt)
-        if (drmModeSetPlane(drm_fd_, overlay_plane_id, crtc_id_,
-                            ui_plane_.fb_id, 0,
-                            0, 0, DISPLAY_PHYS_W, DISPLAY_PHYS_H,    // dst: physical screen
-                            0, 0, DISPLAY_W << 16, DISPLAY_H << 16   // src: portrait buffer
-                           ) != 0) {
-            fprintf(stderr, "[DRM] drmModeSetPlane for UI failed: %s (non-fatal, using primary)\n",
-                    strerror(errno));
-            // Fall back to software compositing if overlay plane not available
-        }
-    } else {
-        fprintf(stderr, "[DRM] No overlay plane found, using software compositing\n");
-    }
+    // Always use software compositing for UI on top of primary framebuffer.
+    // This avoids plane ordering/alpha quirks on some Pi KMS stacks.
+    ui_plane_.id = 0;
+    fprintf(stderr, "[DRM] UI software composition enabled\n");
 
     return true;
 }
@@ -372,29 +353,31 @@ bool DrmDisplay::set_camera_dmabuf(int dmabuf_fd, int width, int height,
         return false;
     }
 
-    // Cover scaling (fills output, avoids stale terminal strips / black bars)
-    const float scale_x = static_cast<float>(dst_w) / static_cast<float>(width);
-    const float scale_y = static_cast<float>(dst_h) / static_cast<float>(height);
-    const float scale = std::max(scale_x, scale_y);
-
-    const float src_crop_w = static_cast<float>(dst_w) / scale;
-    const float src_crop_h = static_cast<float>(dst_h) / scale;
-    const float src_off_x = (static_cast<float>(width) - src_crop_w) * 0.5f;
-    const float src_off_y = (static_cast<float>(height) - src_crop_h) * 0.5f;
-
+    // Contain scaling (no excessive zoom): fit whole camera image into output.
+    // Clear full frame first so no stale terminal/ghost pixels remain.
     for (int y = 0; y < dst_h; y++) {
         uint32_t* dst_row = reinterpret_cast<uint32_t*>(camera_plane_.map + y * camera_plane_.pitch);
-        int src_y = static_cast<int>(src_off_y + (static_cast<float>(y) / static_cast<float>(dst_h)) * src_crop_h);
-        if (src_y < 0) src_y = 0;
-        if (src_y >= height) src_y = height - 1;
-
-        const uint8_t* src_row = reinterpret_cast<const uint8_t*>(src_map) + src_y * stride;
-
         for (int x = 0; x < dst_w; x++) {
-            int src_x = static_cast<int>(src_off_x + (static_cast<float>(x) / static_cast<float>(dst_w)) * src_crop_w);
-            if (src_x < 0) src_x = 0;
-            if (src_x >= width) src_x = width - 1;
+            dst_row[x] = 0xFF000000;
+        }
+    }
 
+    const float scale_x = static_cast<float>(dst_w) / static_cast<float>(width);
+    const float scale_y = static_cast<float>(dst_h) / static_cast<float>(height);
+    const float scale = std::min(scale_x, scale_y);
+
+    const int out_w = std::max(1, static_cast<int>(width * scale));
+    const int out_h = std::max(1, static_cast<int>(height * scale));
+    const int dst_off_x = (dst_w - out_w) / 2;
+    const int dst_off_y = (dst_h - out_h) / 2;
+
+    for (int y = 0; y < out_h; y++) {
+        const int src_y = std::min(height - 1, (y * height) / out_h);
+        const uint8_t* src_row = reinterpret_cast<const uint8_t*>(src_map) + src_y * stride;
+        uint32_t* dst_row = reinterpret_cast<uint32_t*>(camera_plane_.map + (dst_off_y + y) * camera_plane_.pitch) + dst_off_x;
+
+        for (int x = 0; x < out_w; x++) {
+            const int src_x = std::min(width - 1, (x * width) / out_w);
             const uint8_t* p = src_row + src_x * 3;
             const uint8_t r = p[0];
             const uint8_t g = p[1];
@@ -417,15 +400,46 @@ bool DrmDisplay::commit() {
         first_commit = false;
     }
 
-    // For legacy mode, the planes are already set.
-    // If overlay plane exists, update it with current UI buffer.
-    if (ui_plane_.id) {
-        int ret = drmModeSetPlane(drm_fd_, ui_plane_.id, crtc_id_,
-                        ui_plane_.fb_id, 0,
-                        0, 0, DISPLAY_PHYS_W, DISPLAY_PHYS_H,   // physical screen
-                        0, 0, DISPLAY_W << 16, DISPLAY_H << 16);
-        if (ret != 0) {
-            fprintf(stderr, "[DRM] drmModeSetPlane failed in commit(): %s\n", strerror(errno));
+    // Software-composite UI buffer over primary camera buffer.
+    if (camera_plane_.map && ui_plane_.map) {
+        const int dst_w = camera_plane_.width;
+        const int dst_h = camera_plane_.height;
+        const int ui_w = DISPLAY_W;
+        const int ui_h = DISPLAY_H;
+
+        // Rotate portrait UI (480x800) into landscape display (800x480-ish)
+        // and center it in the physical primary framebuffer.
+        const int rot_w = ui_h; // 800
+        const int rot_h = ui_w; // 480
+        const int off_x = (dst_w - rot_w) / 2;
+        const int off_y = (dst_h - rot_h) / 2;
+
+        for (int y = 0; y < rot_h; y++) {
+            uint32_t* dst_row = reinterpret_cast<uint32_t*>(camera_plane_.map + (off_y + y) * camera_plane_.pitch) + off_x;
+
+            for (int x = 0; x < rot_w; x++) {
+                const int src_x = y;
+                const int src_y = ui_h - 1 - x;
+                const uint32_t src = reinterpret_cast<const uint32_t*>(ui_plane_.map + src_y * ui_plane_.pitch)[src_x];
+
+                const uint8_t sa = static_cast<uint8_t>(src >> 24);
+                if (sa == 0) continue;
+
+                const uint8_t sr = static_cast<uint8_t>((src >> 16) & 0xFF);
+                const uint8_t sg = static_cast<uint8_t>((src >> 8) & 0xFF);
+                const uint8_t sb = static_cast<uint8_t>(src & 0xFF);
+
+                uint32_t& dst = dst_row[x];
+                const uint8_t dr = static_cast<uint8_t>((dst >> 16) & 0xFF);
+                const uint8_t dg = static_cast<uint8_t>((dst >> 8) & 0xFF);
+                const uint8_t db = static_cast<uint8_t>(dst & 0xFF);
+
+                const uint8_t out_r = static_cast<uint8_t>((sr * sa + dr * (255 - sa)) / 255);
+                const uint8_t out_g = static_cast<uint8_t>((sg * sa + dg * (255 - sa)) / 255);
+                const uint8_t out_b = static_cast<uint8_t>((sb * sa + db * (255 - sa)) / 255);
+                dst = (0xFFu << 24) | (static_cast<uint32_t>(out_r) << 16)
+                    | (static_cast<uint32_t>(out_g) << 8) | static_cast<uint32_t>(out_b);
+            }
         }
     }
 
