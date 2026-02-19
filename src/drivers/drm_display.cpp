@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cerrno>
 #include <algorithm>
+#include <unordered_map>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
@@ -28,6 +29,27 @@ namespace cinepi {
 // Track the GEM handle imported from DMA-BUF separately from dumb buffer handles.
 // This is file-scoped because the header does not expose it.
 static uint32_t s_camera_imported_gem_handle = 0;
+static std::unordered_map<int, std::pair<void*, size_t>> s_dmabuf_maps;
+
+static void set_plane_zpos_if_available(int drm_fd, uint32_t plane_id, uint64_t zpos) {
+    drmModeObjectProperties* props = drmModeObjectGetProperties(drm_fd, plane_id, DRM_MODE_OBJECT_PLANE);
+    if (!props) return;
+
+    for (uint32_t i = 0; i < props->count_props; i++) {
+        drmModePropertyRes* prop = drmModeGetProperty(drm_fd, props->props[i]);
+        if (!prop) continue;
+
+        if (strcmp(prop->name, "zpos") == 0) {
+            drmModeObjectSetProperty(drm_fd, plane_id, DRM_MODE_OBJECT_PLANE, prop->prop_id, zpos);
+            drmModeFreeProperty(prop);
+            break;
+        }
+
+        drmModeFreeProperty(prop);
+    }
+
+    drmModeFreeObjectProperties(props);
+}
 
 DrmDisplay::DrmDisplay() = default;
 
@@ -91,6 +113,13 @@ void DrmDisplay::deinit() {
         drmModeRmFB(drm_fd_, camera_fb_id_);
         camera_fb_id_ = 0;
     }
+
+    for (auto& kv : s_dmabuf_maps) {
+        if (kv.second.first && kv.second.first != MAP_FAILED) {
+            munmap(kv.second.first, kv.second.second);
+        }
+    }
+    s_dmabuf_maps.clear();
 
     close(drm_fd_);
     drm_fd_ = -1;
@@ -275,6 +304,9 @@ bool DrmDisplay::setup_ui_plane() {
         ui_plane_.id = overlay_plane_id;
         fprintf(stderr, "[DRM] UI overlay plane: %u\n", overlay_plane_id);
 
+        // Keep UI above primary where supported
+        set_plane_zpos_if_available(drm_fd_, overlay_plane_id, 10);
+
         // Set overlay plane - use physical display dimensions
         // (rotation handled by display_lcd_rotate=1 in config.txt)
         if (drmModeSetPlane(drm_fd_, overlay_plane_id, crtc_id_,
@@ -318,32 +350,59 @@ bool DrmDisplay::set_camera_dmabuf(int dmabuf_fd, int width, int height,
         first_frame = false;
     }
 
-    // Robust path: mmap camera dmabuf and copy RGB888 -> XRGB8888 into
-    // the primary dumb buffer already bound to the CRTC.
+    // Robust path: map camera dmabuf and scale into full primary framebuffer.
     const size_t src_size = static_cast<size_t>(stride) * static_cast<size_t>(height);
-    void* src_map = mmap(nullptr, src_size, PROT_READ, MAP_SHARED, dmabuf_fd, 0);
-    if (src_map == MAP_FAILED) {
-        fprintf(stderr, "[DRM] mmap(dmabuf) failed: %s\n", strerror(errno));
+    void* src_map = nullptr;
+
+    auto map_it = s_dmabuf_maps.find(dmabuf_fd);
+    if (map_it == s_dmabuf_maps.end()) {
+        src_map = mmap(nullptr, src_size, PROT_READ, MAP_SHARED, dmabuf_fd, 0);
+        if (src_map == MAP_FAILED) {
+            fprintf(stderr, "[DRM] mmap(dmabuf) failed: %s\n", strerror(errno));
+            return false;
+        }
+        s_dmabuf_maps.emplace(dmabuf_fd, std::make_pair(src_map, src_size));
+    } else {
+        src_map = map_it->second.first;
+    }
+
+    const int dst_w = camera_plane_.width;
+    const int dst_h = camera_plane_.height;
+    if (width <= 0 || height <= 0 || dst_w <= 0 || dst_h <= 0) {
         return false;
     }
 
-    const int copy_w = std::min(width, camera_plane_.width);
-    const int copy_h = std::min(height, camera_plane_.height);
+    // Cover scaling (fills output, avoids stale terminal strips / black bars)
+    const float scale_x = static_cast<float>(dst_w) / static_cast<float>(width);
+    const float scale_y = static_cast<float>(dst_h) / static_cast<float>(height);
+    const float scale = std::max(scale_x, scale_y);
 
-    for (int y = 0; y < copy_h; y++) {
-        const uint8_t* src_row = reinterpret_cast<const uint8_t*>(src_map) + y * stride;
+    const float src_crop_w = static_cast<float>(dst_w) / scale;
+    const float src_crop_h = static_cast<float>(dst_h) / scale;
+    const float src_off_x = (static_cast<float>(width) - src_crop_w) * 0.5f;
+    const float src_off_y = (static_cast<float>(height) - src_crop_h) * 0.5f;
+
+    for (int y = 0; y < dst_h; y++) {
         uint32_t* dst_row = reinterpret_cast<uint32_t*>(camera_plane_.map + y * camera_plane_.pitch);
+        int src_y = static_cast<int>(src_off_y + (static_cast<float>(y) / static_cast<float>(dst_h)) * src_crop_h);
+        if (src_y < 0) src_y = 0;
+        if (src_y >= height) src_y = height - 1;
 
-        for (int x = 0; x < copy_w; x++) {
-            const uint8_t r = src_row[x * 3 + 0];
-            const uint8_t g = src_row[x * 3 + 1];
-            const uint8_t b = src_row[x * 3 + 2];
+        const uint8_t* src_row = reinterpret_cast<const uint8_t*>(src_map) + src_y * stride;
+
+        for (int x = 0; x < dst_w; x++) {
+            int src_x = static_cast<int>(src_off_x + (static_cast<float>(x) / static_cast<float>(dst_w)) * src_crop_w);
+            if (src_x < 0) src_x = 0;
+            if (src_x >= width) src_x = width - 1;
+
+            const uint8_t* p = src_row + src_x * 3;
+            const uint8_t r = p[0];
+            const uint8_t g = p[1];
+            const uint8_t b = p[2];
             dst_row[x] = (0xFFu << 24) | (static_cast<uint32_t>(r) << 16)
                        | (static_cast<uint32_t>(g) << 8) | static_cast<uint32_t>(b);
         }
     }
-
-    munmap(src_map, src_size);
 
     return true;
 }
