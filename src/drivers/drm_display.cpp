@@ -15,6 +15,7 @@
 #include <cerrno>
 #include <algorithm>
 #include <unordered_map>
+#include <vector>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
@@ -30,6 +31,14 @@ namespace cinepi {
 // This is file-scoped because the header does not expose it.
 static uint32_t s_camera_imported_gem_handle = 0;
 static std::unordered_map<int, std::pair<void*, size_t>> s_dmabuf_maps;
+static std::vector<int> s_x_map;
+static std::vector<int> s_y_map;
+static int s_map_src_w = 0;
+static int s_map_src_h = 0;
+static int s_map_dst_w = 0;
+static int s_map_dst_h = 0;
+static int s_map_off_x = 0;
+static int s_map_off_y = 0;
 
 static void set_plane_zpos_if_available(int drm_fd, uint32_t plane_id, uint64_t zpos) {
     drmModeObjectProperties* props = drmModeObjectGetProperties(drm_fd, plane_id, DRM_MODE_OBJECT_PLANE);
@@ -371,13 +380,32 @@ bool DrmDisplay::set_camera_dmabuf(int dmabuf_fd, int width, int height,
     const int dst_off_x = (dst_w - out_w) / 2;
     const int dst_off_y = (dst_h - out_h) / 2;
 
+    if (s_map_src_w != width || s_map_src_h != height ||
+        s_map_dst_w != out_w || s_map_dst_h != out_h ||
+        s_map_off_x != dst_off_x || s_map_off_y != dst_off_y) {
+        s_x_map.assign(out_w, 0);
+        s_y_map.assign(out_h, 0);
+        for (int x = 0; x < out_w; x++) {
+            s_x_map[x] = std::min(width - 1, (x * width) / out_w);
+        }
+        for (int y = 0; y < out_h; y++) {
+            s_y_map[y] = std::min(height - 1, (y * height) / out_h);
+        }
+        s_map_src_w = width;
+        s_map_src_h = height;
+        s_map_dst_w = out_w;
+        s_map_dst_h = out_h;
+        s_map_off_x = dst_off_x;
+        s_map_off_y = dst_off_y;
+    }
+
     for (int y = 0; y < out_h; y++) {
-        const int src_y = std::min(height - 1, (y * height) / out_h);
+        const int src_y = s_y_map[y];
         const uint8_t* src_row = reinterpret_cast<const uint8_t*>(src_map) + src_y * stride;
         uint32_t* dst_row = reinterpret_cast<uint32_t*>(camera_plane_.map + (dst_off_y + y) * camera_plane_.pitch) + dst_off_x;
 
         for (int x = 0; x < out_w; x++) {
-            const int src_x = std::min(width - 1, (x * width) / out_w);
+            const int src_x = s_x_map[x];
             const uint8_t* p = src_row + src_x * 3;
             const uint8_t r = p[0];
             const uint8_t g = p[1];

@@ -96,12 +96,12 @@ void GalleryScene::load_photo_list() {
     struct dirent* ent;
     while ((ent = readdir(dir)) != nullptr) {
         std::string name = ent->d_name;
-        // Check for .jpg or .jpeg extension
-        size_t len = name.length();
-        if (len < 4) continue;
-        std::string ext = name.substr(len - 4);
-        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-        if (ext != ".jpg" && ext != "jpeg") continue;
+        // Check for .jpg/.jpeg extension (case-insensitive)
+        std::string lower = name;
+        std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+        bool is_jpg = lower.size() >= 4 && lower.substr(lower.size() - 4) == ".jpg";
+        bool is_jpeg = lower.size() >= 5 && lower.substr(lower.size() - 5) == ".jpeg";
+        if (!is_jpg && !is_jpeg) continue;
 
         photos_.push_back(cfg.photo_dir + "/" + name);
     }

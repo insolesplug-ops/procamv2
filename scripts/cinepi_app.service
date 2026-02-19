@@ -2,6 +2,8 @@
 Description=CinePi Camera Application
 After=network-online.target ssh.service
 Wants=network-online.target
+StartLimitIntervalSec=120
+StartLimitBurst=3
 
 [Service]
 Type=simple

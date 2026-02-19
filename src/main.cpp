@@ -17,6 +17,7 @@
 #include "ui/camera_scene.h"
 #include "ui/gallery_scene.h"
 #include "ui/settings_scene.h"
+#include "ui.h"
 #include "gallery/photo_manager.h"
 #include "power/power_manager.h"
 
@@ -222,6 +223,8 @@ private:
     }
     
     bool init_ui() {
+        // Initialize SquareLine generated UI once LVGL is ready
+        ui_init();
         fprintf(stderr, "[AppInit] ✓ UI initialized\n");
         return true;
     }
@@ -274,6 +277,9 @@ int main(int argc, char* argv[]) {
     SettingsScene settings_scene;
     settings_scene.init();
 
+    Scene current_scene = Scene::Camera;
+    Scene last_scene = Scene::Camera;
+
     PhotoManager photo_mgr;
     if (app.has_gpio()) {
         I2CSensors* sensors_ptr = app.has_sensors() ? app.sensors() : nullptr;
@@ -313,7 +319,6 @@ int main(int argc, char* argv[]) {
 
     using clock = std::chrono::steady_clock;
     auto target_frame_duration = std::chrono::milliseconds(33);  // 30 FPS
-    Scene prev_scene = Scene::Camera;
     uint32_t frame_count = 0;
     uint32_t frame_drops = 0;
     auto last_fps_time = clock::now();
@@ -321,6 +326,30 @@ int main(int argc, char* argv[]) {
 
     while (g_running) {
         auto frame_start = clock::now();
+
+        // Scene detection and lifecycle handling
+        if (lv_scr_act() == ui_Gallery1) {
+            current_scene = Scene::Gallery;
+        } else if (lv_scr_act() == ui_settings1) {
+            current_scene = Scene::Settings;
+        } else {
+            current_scene = Scene::Camera;
+        }
+
+        if (current_scene != last_scene) {
+            if (last_scene == Scene::Gallery) gallery_scene.leave();
+            if (last_scene == Scene::Settings) settings_scene.leave();
+
+            if (current_scene == Scene::Gallery) gallery_scene.enter();
+            if (current_scene == Scene::Settings) settings_scene.enter();
+
+            last_scene = current_scene;
+        }
+
+        // Scene updates
+        if (current_scene == Scene::Camera && app.has_sensors()) {
+            camera_scene.update(*app.camera(), *app.sensors());
+        }
 
         // Power management update (optional hardware)
         if (app.has_gpio() && app.has_sensors()) {
