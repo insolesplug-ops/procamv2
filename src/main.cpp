@@ -226,6 +226,14 @@ private:
     bool init_ui() {
         // Initialize SquareLine generated UI once LVGL is ready
         ui_init();
+
+        // Ensure the main camera UI is the active screen
+        if (ui_main) {
+            lv_scr_load(ui_main);
+        }
+
+        // Force full redraw so UI buffer is populated immediately
+        lv_obj_invalidate(lv_scr_act());
         fprintf(stderr, "[AppInit] ✓ UI initialized\n");
         return true;
     }

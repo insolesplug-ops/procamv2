@@ -453,6 +453,11 @@ bool DrmDisplay::commit() {
                 const uint8_t sa = static_cast<uint8_t>(src >> 24);
                 if (sa == 0) continue;
 
+                if (sa == 255) {
+                    dst_row[x] = (0xFFu << 24) | (src & 0x00FFFFFFu);
+                    continue;
+                }
+
                 const uint8_t sr = static_cast<uint8_t>((src >> 16) & 0xFF);
                 const uint8_t sg = static_cast<uint8_t>((src >> 8) & 0xFF);
                 const uint8_t sb = static_cast<uint8_t>(src & 0xFF);
