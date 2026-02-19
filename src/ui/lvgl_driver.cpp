@@ -64,7 +64,8 @@ bool LvglDriver::init(DrmDisplay& display, TouchInput* touch) {
     disp_drv.hor_res = DISPLAY_W;
     disp_drv.ver_res = DISPLAY_H;
     disp_drv.draw_buf = &draw_buf;
-    disp_drv.flush_cb = LvglDriver::flush_cb;
+    // Use reinterpret_cast to handle void* -> typedef* conversion
+    disp_drv.flush_cb = reinterpret_cast<decltype(disp_drv.flush_cb)>(LvglDriver::flush_cb);
     disp_drv.user_data = this;
     lv_disp_drv_register(&disp_drv);
 
@@ -72,7 +73,7 @@ bool LvglDriver::init(DrmDisplay& display, TouchInput* touch) {
     static lv_indev_drv_t indev_drv;
     lv_indev_drv_init(&indev_drv);
     indev_drv.type = LV_INDEV_TYPE_POINTER;
-    indev_drv.read_cb = LvglDriver::input_read_cb;
+    indev_drv.read_cb = reinterpret_cast<decltype(indev_drv.read_cb)>(LvglDriver::input_read_cb);
     indev_drv.user_data = this;
     lv_indev_drv_register(&indev_drv);
 
