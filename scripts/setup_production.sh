@@ -85,10 +85,10 @@ start_x=1
 camera_auto_detect=1
 
 # ─── Display (Waveshare 4.3" DSI) ───────────────
-dtoverlay=vc4-kms-dsi-generic
-framebuffer_width=480
-framebuffer_height=800
-display_lcd_rotate=1
+# vc4-kms-dsi-generic with explicit portrait dimensions and 90° CW rotation.
+# IMPORTANT: do NOT add display_lcd_rotate=1 – that is a DispmanX/fbdev
+# parameter and has no effect under KMS; it will fight with the video= cmdline.
+dtoverlay=vc4-kms-dsi-generic,width=480,height=800
 
 # ─── Silent Boot ────────────────────────────────
 disable_splash=1
@@ -122,7 +122,7 @@ if [[ -z "$PARTUUID" ]]; then
     PARTUUID=$(blkid -s PARTUUID -o value /dev/mmcblk0p2 2>/dev/null || echo "fixme")
 fi
 
-echo "console=serial0,115200 console=tty3 root=PARTUUID=${PARTUUID} rootfstype=ext4 quiet splash loglevel=0 logo.nologo vt.global_cursor_default=0 fsck.mode=force fsck.repair=yes" > "$CMDLINE"
+echo "console=serial0,115200 console=tty3 root=PARTUUID=${PARTUUID} rootfstype=ext4 video=DSI-1:480x800@60,rotate=90 quiet splash loglevel=0 logo.nologo vt.global_cursor_default=0 fsck.mode=force fsck.repair=yes" > "$CMDLINE"
 
 log "Kernel command line configured for silent boot"
 

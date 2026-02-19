@@ -333,11 +333,23 @@ crtc_ok:
 
     // Discover PRIMARY plane (camera)
     camera_plane_id_ = find_plane_type(DRM_PLANE_TYPE_PRIMARY);
-    if (!camera_plane_id_)
+    if (!camera_plane_id_) {
         fprintf(stderr, "[DRM] WARNING: no primary plane found\n");
-    else {
+    } else {
         set_plane_zpos(drm_fd_, camera_plane_id_, 0);
-        fprintf(stderr, "[DRM] camera primary plane: %u\n", camera_plane_id_);
+        fprintf(stderr, "[DRM] Camera primary plane: %u\n", camera_plane_id_);
+
+        // Log supported formats so stride/fourcc mismatches are diagnosable.
+        drmModePlane *pl = drmModeGetPlane(drm_fd_, camera_plane_id_);
+        if (pl) {
+            fprintf(stderr, "[DRM] Primary plane formats:");
+            for (uint32_t i = 0; i < pl->count_formats; i++) {
+                uint32_t f = pl->formats[i];
+                fprintf(stderr, " %.4s(0x%08x)", (char*)&f, f);
+            }
+            fprintf(stderr, "\n");
+            drmModeFreePlane(pl);
+        }
     }
     return true;
 }
@@ -451,17 +463,41 @@ DrmDisplay::get_or_import(int fd, int w, int h, int stride, uint32_t fourcc)
                        handles, strides, offsets,
                        &entry.fb_id, 0) != 0) {
         fprintf(stderr,
-                "[DRM] AddFB2(camera %dx%d stride=%d fmt=0x%08x) failed: %s\n",
-                w, h, stride, fourcc, strerror(errno));
+                "[DRM] AddFB2(camera %dx%d stride=%d fmt=0x%08x / %.4s) failed: %s\n",
+                w, h, stride, fourcc, (char*)&fourcc, strerror(errno));
+
+        // Automatic format fallback: try the BGR/RGB swap partner, then XRGB8888.
+        // Colour channels may be swapped depending on ISP output order.
+        static const uint32_t fallbacks[] = {
+            0x34324742,  // DRM_FORMAT_BGR888
+            0x34324752,  // DRM_FORMAT_RGB888
+            0x34325258,  // DRM_FORMAT_XRGB8888  (32bpp, stride must be w*4)
+        };
+        for (uint32_t fb : fallbacks) {
+            if (fb == fourcc) continue;
+            // For 32bpp formats, recompute stride
+            uint32_t try_stride = (fb == 0x34325258 || fb == 0x34324258) ? (uint32_t)w * 4 : strides[0];
+            strides[0] = try_stride;
+            if (drmModeAddFB2(drm_fd_, w, h, fb,
+                               handles, strides, offsets,
+                               &entry.fb_id, 0) == 0) {
+                fprintf(stderr, "[DRM] AddFB2 fallback succeeded with fmt=0x%08x / %.4s\n",
+                        fb, (char*)&fb);
+                fourcc = fb;
+                goto import_ok;
+            }
+        }
+
         drm_gem_close gc{}; gc.handle = entry.gem_handle;
         drmIoctl(drm_fd_, DRM_IOCTL_GEM_CLOSE, &gc);
         return nullptr;
     }
 
+import_ok:
     cam_fb_cache_.push_back(entry);
     fprintf(stderr,
-            "[DRM] camera FB imported: fd=%d %dx%d stride=%d fmt=0x%08x → fb=%u\n",
-            fd, w, h, stride, fourcc, entry.fb_id);
+            "[DRM] Camera FB imported: fd=%d %dx%d stride=%d fmt=0x%08x/%.4s → fb=%u\n",
+            fd, w, h, stride, fourcc, (char*)&fourcc, entry.fb_id);
     return &cam_fb_cache_.back();
 }
 

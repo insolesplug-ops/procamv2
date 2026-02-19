@@ -78,6 +78,9 @@ private:
     int shutter_us_ = 8333;
     int wb_mode_ = 0;
     float zoom_ = 1.0f;
+
+    // DRM fourcc of the actual post-validate pixel format (set during init()).
+    uint32_t preview_fourcc_ = 0;
 };
 
 } // namespace cinepi

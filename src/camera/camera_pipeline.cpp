@@ -51,28 +51,40 @@ bool CameraPipeline::init() {
     }
 
     StreamConfiguration& stream_cfg = config_->at(0);
-    // 640x480 landscape from the sensor.  The DRM HW scaler maps this
-    // onto the full CRTC area (portrait or landscape) without any CPU work.
-    // XRGB8888: 32bpp packed, stride = width*4, directly importable as
-    // DRM_FORMAT_XRGB8888 - universally supported in all libcamera versions.
+    // RGB888 = native IMX219 ISP output (R,G,B packed, 3 bytes/pixel).
+    // stride = width * 3 = 1920 for 640px wide.
+    // DRM_FORMAT_RGB888 (0x34324752) is supported by the vc4 HVS plane.
+    // Using XRGB8888 here caused the noise: libcamera auto-adjusted
+    // to RGB888 (stride=1920) but we were claiming XRGB8888 (stride=2560)
+    // to DRM → every scanline offset was wrong → pure noise.
     stream_cfg.size        = Size(PREVIEW_W, PREVIEW_H);  // 640x480
-    stream_cfg.pixelFormat = formats::XRGB8888;
+    stream_cfg.pixelFormat = formats::RGB888;
     stream_cfg.bufferCount = CAMERA_BUF_COUNT;
-
-    // Note: libcamera Transform::Rot90 is NOT used here because this Pi's
-    // libcamera version does not expose CameraConfiguration::transform.
-    // Portrait rotation is achieved via the /boot/config.txt dtoverlay rotate=90
-    // which makes KMS report a 480x800 native mode to the DRM driver.
 
     CameraConfiguration::Status status = config_->validate();
     if (status == CameraConfiguration::Invalid) {
         fprintf(stderr, "[Camera] Configuration invalid\n");
         return false;
     }
-    if (status == CameraConfiguration::Adjusted) {
-        fprintf(stderr, "[Camera] Configuration adjusted: %s %dx%d\n",
-                stream_cfg.pixelFormat.toString().c_str(),
-                stream_cfg.size.width, stream_cfg.size.height);
+
+    // Map the ACTUAL post-validate pixel format to the matching DRM fourcc.
+    // This ensures stride calculations are always consistent.
+    {
+        auto pf = stream_cfg.pixelFormat;
+        if      (pf == formats::RGB888)   preview_fourcc_ = 0x34324752; // DRM_FORMAT_RGB888
+        else if (pf == formats::BGR888)   preview_fourcc_ = 0x34324742; // DRM_FORMAT_BGR888
+        else if (pf == formats::XRGB8888) preview_fourcc_ = 0x34325258; // DRM_FORMAT_XRGB8888
+        else if (pf == formats::XBGR8888) preview_fourcc_ = 0x34324258; // DRM_FORMAT_XBGR8888
+        else if (pf == formats::ARGB8888) preview_fourcc_ = 0x34325241; // DRM_FORMAT_ARGB8888
+        else {
+            // Unknown format – fall back to RGB888 and hope for the best
+            preview_fourcc_ = 0x34324752;
+            fprintf(stderr, "[Camera] WARNING: unknown pixelFormat %s, "
+                            "assuming DRM_FORMAT_RGB888\n",
+                    pf.toString().c_str());
+        }
+        fprintf(stderr, "[Camera] Format: %s  stride=%u  fourcc=0x%08x\n",
+                pf.toString().c_str(), stream_cfg.stride, preview_fourcc_);
     }
 
     if (camera_->configure(config_.get()) != 0) {
@@ -176,9 +188,10 @@ void CameraPipeline::request_complete(Request* request) {
         int w = config_->at(0).size.width;
         int h = config_->at(0).size.height;
 
-        // DRM_FORMAT_XRGB8888 = fourcc('X','R','2','4') = 0x34325258
-        // 32bpp, stride = width * 4.  Zero-copy importable by DRM primary plane.
-        frame_cb_(fd, w, h, stride, 0x34325258);
+        // Use the fourcc determined at init() time from the actual
+        // post-validate pixel format.  This guarantees the DRM FB is
+        // registered with exactly the stride/format the buffer contains.
+        frame_cb_(fd, w, h, stride, preview_fourcc_);
     }
 
     // Re-queue the request
