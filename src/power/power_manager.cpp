@@ -45,13 +45,13 @@ PowerManager::PowerManager() = default;
 PowerManager::~PowerManager() = default;
 
 void PowerManager::init(DrmDisplay& display, CameraPipeline& cam,
-                        TouchInput& touch, GpioDriver& gpio,
-                        I2CSensors& sensors, LvglDriver& lvgl) {
+                        TouchInput* touch, GpioDriver& gpio,
+                        I2CSensors* sensors, LvglDriver& lvgl) {
     display_ = &display;
     cam_ = &cam;
-    touch_ = &touch;
+    touch_ = touch;
     gpio_ = &gpio;
-    sensors_ = &sensors;
+    sensors_ = sensors;
     lvgl_ = &lvgl;
 
     timeout_sec_ = ConfigManager::instance().get().display.standby_sec;

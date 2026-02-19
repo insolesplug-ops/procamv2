@@ -22,10 +22,10 @@ namespace cinepi {
 PhotoManager::PhotoManager() = default;
 PhotoManager::~PhotoManager() = default;
 
-void PhotoManager::init(CameraPipeline& cam, GpioDriver& gpio, I2CSensors& sensors) {
+void PhotoManager::init(CameraPipeline& cam, GpioDriver& gpio, I2CSensors* sensors) {
     cam_ = &cam;
     gpio_ = &gpio;
-    sensors_ = &sensors;
+    sensors_ = sensors;
 
     // Register shutter button callback
     gpio.on_shutter([this]() {

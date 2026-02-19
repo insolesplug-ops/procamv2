@@ -10,8 +10,12 @@
 #ifdef __linux__
 #include <linux/i2c-dev.h>
 #endif
+#ifdef LIBGPIOD_AVAILABLE
 #include <gpiod.h>
+#endif
+#ifdef LIBCAMERA_AVAILABLE
 #include <libcamera/libcamera.h>
+#endif
 #include <dirent.h>
 #ifdef __linux__
 #include <linux/input.h>
@@ -56,6 +60,7 @@ bool HardwareHealth::init() {
 }
 
 bool HardwareHealth::check_camera() {
+#ifdef LIBCAMERA_AVAILABLE
     try {
         using namespace libcamera;
         auto cm = std::make_unique<CameraManager>();
@@ -86,6 +91,11 @@ bool HardwareHealth::check_camera() {
         status_[HardwareComponent::Camera] = HardwareStatus::Failed;
         return false;
     }
+#else
+    fprintf(stderr, "[Hardware] libcamera not available\n");
+    status_[HardwareComponent::Camera] = HardwareStatus::Failed;
+    return false;
+#endif
 }
 
 bool HardwareHealth::check_display() {
@@ -105,45 +115,37 @@ bool HardwareHealth::check_display() {
 }
 
 bool HardwareHealth::check_touch() {
+    // Simple check: just verify /dev/input exists and has event devices
     DIR* dir = opendir("/dev/input");
     if (!dir) {
-        status_[HardwareComponent::TouchInput] = HardwareStatus::Failed;
-        return false;
+        fprintf(stderr, "[Hardware] /dev/input not found (touch disabled)\n");
+        status_[HardwareComponent::TouchInput] = HardwareStatus::Degraded;
+        return false;  // Not critical, app can run without touch
     }
     
-    bool found = false;
+    bool found_event = false;
     struct dirent* ent;
-    while ((ent = readdir(dir)) != nullptr && !found) {
-        if (strncmp(ent->d_name, "event", 5) != 0) continue;
-        
-        std::string path = std::string("/dev/input/") + ent->d_name;
-        int fd = open(path.c_str(), O_RDONLY | O_NONBLOCK);
-        if (fd < 0) continue;
-        
-        unsigned long abs_bits[(ABS_MAX + 1) / (sizeof(long) * 8) + 1] = {};
-        ioctl(fd, EVIOCGBIT(EV_ABS, sizeof(abs_bits)), abs_bits);
-        
-        bool has_mt_x = (abs_bits[ABS_MT_POSITION_X / (sizeof(long) * 8)] >>
-                         (ABS_MT_POSITION_X % (sizeof(long) * 8))) & 1;
-        
-        close(fd);
-        
-        if (has_mt_x) {
-            status_[HardwareComponent::TouchInput] = HardwareStatus::OK;
-            found = true;
+    while ((ent = readdir(dir)) != nullptr) {
+        if (strncmp(ent->d_name, "event", 5) == 0) {
+            found_event = true;
+            break;
         }
     }
     closedir(dir);
     
-    if (!found) {
-        status_[HardwareComponent::TouchInput] = HardwareStatus::Failed;
-        return false;
+    if (found_event) {
+        fprintf(stderr, "[Hardware] Touch input device found\n");
+        status_[HardwareComponent::TouchInput] = HardwareStatus::OK;
+        return true;
+    } else {
+        fprintf(stderr, "[Hardware] No touch input devices found\n");
+        status_[HardwareComponent::TouchInput] = HardwareStatus::Degraded;
+        return false;  // Not critical
     }
-    
-    return true;
 }
 
 bool HardwareHealth::check_gpio() {
+#ifdef LIBGPIOD_AVAILABLE
     gpiod_chip* chip = gpiod_chip_open(GPIO_CHIP);
     if (!chip) {
         status_[HardwareComponent::GPIOButtons] = HardwareStatus::Failed;
@@ -153,6 +155,11 @@ bool HardwareHealth::check_gpio() {
     status_[HardwareComponent::GPIOButtons] = HardwareStatus::OK;
     gpiod_chip_close(chip);
     return true;
+#else
+    fprintf(stderr, "[Hardware] libgpiod not available\n");
+    status_[HardwareComponent::GPIOButtons] = HardwareStatus::Failed;
+    return false;
+#endif
 }
 
 bool HardwareHealth::check_i2c() {

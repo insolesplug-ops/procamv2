@@ -18,7 +18,7 @@ public:
     PhotoManager();
     ~PhotoManager();
 
-    void init(CameraPipeline& cam, GpioDriver& gpio, I2CSensors& sensors);
+    void init(CameraPipeline& cam, GpioDriver& gpio, I2CSensors* sensors);
 
     // Trigger a capture (called from shutter button or UI)
     void trigger_capture();

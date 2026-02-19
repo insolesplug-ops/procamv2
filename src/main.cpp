@@ -248,14 +248,15 @@ int main(int argc, char* argv[]) {
     }
 
     PowerManager power;
-    if (app.has_gpio() && app.has_sensors()) {
-        TouchInput* touch_ptr = app.touch();
+    if (app.has_gpio()) {
+        TouchInput* touch_ptr = app.has_touch() ? app.touch() : nullptr;
+        I2CSensors* sensors_ptr = app.has_sensors() ? app.sensors() : nullptr;
         power.init(*app.display(), *app.camera(), 
                   touch_ptr,
-                  *app.gpio(), *app.sensors(), *app.lvgl());
+                  *app.gpio(), sensors_ptr, *app.lvgl());
         power.set_timeout(config.get().display.standby_sec);
     } else {
-        fprintf(stderr, "[Main] ⚠ Power manager disabled (needs GPIO + Sensors)\n");
+        fprintf(stderr, "[Main] ⚠ Power manager disabled (needs GPIO)\n");
     }
 
     if (!app.camera()->start_preview()) {

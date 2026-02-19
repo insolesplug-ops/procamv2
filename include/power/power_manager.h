@@ -22,8 +22,8 @@ public:
     ~PowerManager();
 
     void init(DrmDisplay& display, CameraPipeline& cam,
-              TouchInput& touch, GpioDriver& gpio,
-              I2CSensors& sensors, LvglDriver& lvgl);
+              TouchInput* touch, GpioDriver& gpio,
+              I2CSensors* sensors, LvglDriver& lvgl);
 
     // Call in main loop - checks idle timeout
     void update();
