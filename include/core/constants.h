@@ -23,11 +23,8 @@ constexpr int DISPLAY_H         = 800;   // Portrait height (matches LVGL canvas
 constexpr int UI_BPP            = 32;    // ARGB8888 for overlay plane
 
 // ─── Camera ─────────────────────────────────────────────────────────
-// After libcamera Transform::Rot90 the sensor's 640×480 landscape output
-// becomes 480×640 portrait.  These are the post-transform dimensions that
-// arrive in the DMA-BUF callback.
-constexpr int PREVIEW_W         = 480;   // Portrait width  after Rot90
-constexpr int PREVIEW_H         = 640;   // Portrait height after Rot90
+constexpr int PREVIEW_W         = 640;   // Sensor landscape output width
+constexpr int PREVIEW_H         = 480;   // Sensor landscape output height
 constexpr int PREVIEW_FPS       = 30;
 constexpr int CAPTURE_W         = 3280;
 constexpr int CAPTURE_H         = 2464;
