@@ -183,8 +183,9 @@ crtc_found:
 
     // Set mode on CRTC using legacy API as initial setup
     // We'll create a black framebuffer for the primary plane
+    // Use PORTRAIT dimensions (480x800) not landscape mode dimensions
     DrmPlane primary;
-    if (!create_dumb_buffer(primary, mode.hdisplay, mode.vdisplay, 32)) {
+    if (!create_dumb_buffer(primary, DISPLAY_W, DISPLAY_H, 32)) {
         fprintf(stderr, "[DRM] Failed to create primary dumb buffer\n");
         drmModeFreeConnector(conn);
         drmModeFreeResources(res);
@@ -276,7 +277,7 @@ bool DrmDisplay::setup_ui_plane() {
         // Set overlay plane
         if (drmModeSetPlane(drm_fd_, overlay_plane_id, crtc_id_,
                             ui_plane_.fb_id, 0,
-                            0, 0, DISPLAY_PHYS_W, DISPLAY_PHYS_H,    // dst (screen)
+                            0, 0, DISPLAY_W, DISPLAY_H,    // dst (screen) - Portrait
                             0, 0, DISPLAY_W << 16, DISPLAY_H << 16   // src (buffer)
                            ) != 0) {
             fprintf(stderr, "[DRM] drmModeSetPlane for UI failed: %s (non-fatal, using primary)\n",
@@ -356,7 +357,7 @@ bool DrmDisplay::set_camera_dmabuf(int dmabuf_fd, int width, int height,
     if (primary_plane_id) {
         drmModeSetPlane(drm_fd_, primary_plane_id, crtc_id_,
                         camera_fb_id_, 0,
-                        0, 0, DISPLAY_PHYS_W, DISPLAY_PHYS_H,
+                        0, 0, DISPLAY_W, DISPLAY_H,
                         0, 0, width << 16, height << 16);
     } else {
         // Fallback: set on CRTC directly
@@ -375,7 +376,7 @@ bool DrmDisplay::commit() {
     if (ui_plane_.id) {
         drmModeSetPlane(drm_fd_, ui_plane_.id, crtc_id_,
                         ui_plane_.fb_id, 0,
-                        0, 0, DISPLAY_PHYS_W, DISPLAY_PHYS_H,
+                        0, 0, DISPLAY_W, DISPLAY_H,
                         0, 0, DISPLAY_W << 16, DISPLAY_H << 16);
     }
 
