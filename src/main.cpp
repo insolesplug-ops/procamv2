@@ -92,9 +92,20 @@ private:
             return false;
         }
         
-        camera_ = std::make_unique<CameraPipeline>();
-        if (!camera_->init()) {
-            fprintf(stderr, "[AppInit] Camera init failed\n");
+        try {
+            camera_ = std::make_unique<CameraPipeline>();
+            if (!camera_ || !camera_->init()) {
+                fprintf(stderr, "[AppInit] Camera init failed\n");
+                camera_.reset();
+                return false;
+            }
+        } catch (const std::exception& e) {
+            fprintf(stderr, "[AppInit] Camera init exception: %s\n", e.what());
+            camera_.reset();
+            return false;
+        } catch (...) {
+            fprintf(stderr, "[AppInit] Camera init unknown exception\n");
+            camera_.reset();
             return false;
         }
         
@@ -108,9 +119,20 @@ private:
             return false;
         }
         
-        display_ = std::make_unique<DrmDisplay>();
-        if (!display_->init()) {
-            fprintf(stderr, "[AppInit] Display init failed\n");
+        try {
+            display_ = std::make_unique<DrmDisplay>();
+            if (!display_ || !display_->init()) {
+                fprintf(stderr, "[AppInit] Display init failed\n");
+                display_.reset();
+                return false;
+            }
+        } catch (const std::exception& e) {
+            fprintf(stderr, "[AppInit] Display init exception: %s\n", e.what());
+            display_.reset();
+            return false;
+        } catch (...) {
+            fprintf(stderr, "[AppInit] Display init unknown exception\n");
+            display_.reset();
             return false;
         }
         
@@ -176,11 +198,22 @@ private:
             return false;
         }
         
-        lvgl_ = std::make_unique<LvglDriver>();
-        TouchInput* touch_ptr = touch_.get();
-        
-        if (!lvgl_->init(*display_, touch_ptr)) {
-            fprintf(stderr, "[AppInit] LVGL init failed\n");
+        try {
+            lvgl_ = std::make_unique<LvglDriver>();
+            TouchInput* touch_ptr = touch_.get();
+            
+            if (!lvgl_ || !lvgl_->init(*display_, touch_ptr)) {
+                fprintf(stderr, "[AppInit] LVGL init failed\n");
+                lvgl_.reset();
+                return false;
+            }
+        } catch (const std::exception& e) {
+            fprintf(stderr, "[AppInit] LVGL init exception: %s\n", e.what());
+            lvgl_.reset();
+            return false;
+        } catch (...) {
+            fprintf(stderr, "[AppInit] LVGL init unknown exception\n");
+            lvgl_.reset();
             return false;
         }
         
