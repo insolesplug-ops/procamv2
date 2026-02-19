@@ -45,18 +45,15 @@ std::string TouchInput::find_touch_device() {
         char name[256] = {};
         ioctl(fd, EVIOCGNAME(sizeof(name)), name);
 
-        // Check for ABS_MT_POSITION_X capability (multitouch)
-        unsigned long abs_bits[(ABS_MAX + 1) / (sizeof(long) * 8) + 1] = {};
-        ioctl(fd, EVIOCGBIT(EV_ABS, sizeof(abs_bits)), abs_bits);
-
-        bool has_mt_x = (abs_bits[ABS_MT_POSITION_X / (sizeof(long) * 8)] >>
-                         (ABS_MT_POSITION_X % (sizeof(long) * 8))) & 1;
-        bool has_abs_x = (abs_bits[ABS_X / (sizeof(long) * 8)] >>
-                          (ABS_X % (sizeof(long) * 8))) & 1;
+        struct input_absinfo absinfo = {};
+        bool has_mt = (ioctl(fd, EVIOCGABS(ABS_MT_POSITION_X), &absinfo) == 0) ||
+                      (ioctl(fd, EVIOCGABS(ABS_MT_POSITION_Y), &absinfo) == 0);
+        bool has_single = (ioctl(fd, EVIOCGABS(ABS_X), &absinfo) == 0) ||
+                          (ioctl(fd, EVIOCGABS(ABS_Y), &absinfo) == 0);
 
         close(fd);
 
-        if (has_mt_x || has_abs_x) {
+        if (has_mt || has_single) {
             fprintf(stderr, "[Touch] Found device: %s (%s)\n", path.c_str(), name);
             closedir(dir);
             return path;
@@ -79,8 +76,10 @@ bool TouchInput::init() {
         return false;
     }
 
-    // Grab exclusive access
+    // Try exclusive access (non-fatal if unsupported)
     ioctl(fd_, EVIOCGRAB, 1);
+
+    query_abs_ranges();
 
     running_ = true;
     thread_ = std::thread(&TouchInput::reader_thread, this);
@@ -103,11 +102,21 @@ TouchPoint TouchInput::read() {
     int phys_x = raw_x_.load(std::memory_order_acquire);
     int phys_y = raw_y_.load(std::memory_order_acquire);
 
-    // Rotate 90° clockwise: landscape (800x480) -> portrait (480x800)
-    // Portrait x = phys_y (mapped from 0..479 to 0..479)
-    // Portrait y = (799 - phys_x) (mapped from 0..799 to 0..799)
-    tp.x = phys_y;
-    tp.y = (DISPLAY_H - 1) - (phys_x * (DISPLAY_H - 1) / (DISPLAY_PHYS_W - 1));
+    // Normalize raw touch coordinates using device-reported ABS ranges.
+    int norm_x = 0;
+    int norm_y = 0;
+
+    int x_range = abs_max_x_ - abs_min_x_;
+    int y_range = abs_max_y_ - abs_min_y_;
+    if (x_range <= 0) x_range = DISPLAY_PHYS_W - 1;
+    if (y_range <= 0) y_range = DISPLAY_PHYS_H - 1;
+
+    norm_x = (phys_x - abs_min_x_) * (DISPLAY_PHYS_W - 1) / x_range;
+    norm_y = (phys_y - abs_min_y_) * (DISPLAY_PHYS_H - 1) / y_range;
+
+    // Rotate 90° clockwise: landscape -> portrait
+    tp.x = norm_y;
+    tp.y = (DISPLAY_H - 1) - norm_x;
     tp.pressed = pressed_.load();
 
     // Clamp
@@ -117,6 +126,35 @@ TouchPoint TouchInput::read() {
     if (tp.y >= DISPLAY_H) tp.y = DISPLAY_H - 1;
 
     return tp;
+}
+
+bool TouchInput::query_abs_ranges() {
+    if (fd_ < 0) return false;
+
+    struct input_absinfo abs_x = {};
+    struct input_absinfo abs_y = {};
+
+    bool ok_x = false;
+    bool ok_y = false;
+
+    if (ioctl(fd_, EVIOCGABS(ABS_MT_POSITION_X), &abs_x) == 0) ok_x = true;
+    else if (ioctl(fd_, EVIOCGABS(ABS_X), &abs_x) == 0) ok_x = true;
+
+    if (ioctl(fd_, EVIOCGABS(ABS_MT_POSITION_Y), &abs_y) == 0) ok_y = true;
+    else if (ioctl(fd_, EVIOCGABS(ABS_Y), &abs_y) == 0) ok_y = true;
+
+    if (ok_x && ok_y) {
+        abs_min_x_ = abs_x.minimum;
+        abs_max_x_ = abs_x.maximum;
+        abs_min_y_ = abs_y.minimum;
+        abs_max_y_ = abs_y.maximum;
+        fprintf(stderr, "[Touch] ABS ranges X:[%d..%d] Y:[%d..%d]\n",
+                abs_min_x_, abs_max_x_, abs_min_y_, abs_max_y_);
+        return true;
+    }
+
+    fprintf(stderr, "[Touch] Could not query ABS ranges, using defaults\n");
+    return false;
 }
 
 uint64_t TouchInput::last_activity_ms() const {

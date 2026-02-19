@@ -362,18 +362,10 @@ bool DrmDisplay::set_camera_dmabuf(int dmabuf_fd, int width, int height,
         return false;
     }
 
-    // Contain scaling (no excessive zoom): fit whole camera image into output.
-    // Clear full frame first so no stale terminal/ghost pixels remain.
-    for (int y = 0; y < dst_h; y++) {
-        uint32_t* dst_row = reinterpret_cast<uint32_t*>(camera_plane_.map + y * camera_plane_.pitch);
-        for (int x = 0; x < dst_w; x++) {
-            dst_row[x] = 0xFF000000;
-        }
-    }
-
+    // Cover scaling: fill full screen (no black bars / stale terminal strips).
     const float scale_x = static_cast<float>(dst_w) / static_cast<float>(width);
     const float scale_y = static_cast<float>(dst_h) / static_cast<float>(height);
-    const float scale = std::min(scale_x, scale_y);
+    const float scale = std::max(scale_x, scale_y);
 
     const int out_w = std::max(1, static_cast<int>(width * scale));
     const int out_h = std::max(1, static_cast<int>(height * scale));
@@ -435,19 +427,15 @@ bool DrmDisplay::commit() {
         const int ui_w = DISPLAY_W;
         const int ui_h = DISPLAY_H;
 
-        // Rotate portrait UI (480x800) into landscape display (800x480-ish)
-        // and center it in the physical primary framebuffer.
-        const int rot_w = ui_h; // 800
-        const int rot_h = ui_w; // 480
-        const int off_x = (dst_w - rot_w) / 2;
-        const int off_y = (dst_h - rot_h) / 2;
+        // Scale UI directly to the current scanout size.
+        // This avoids rotation/offset assumptions that caused shifted/cut UI
+        // on different DSI + firmware rotation combinations.
+        for (int y = 0; y < dst_h; y++) {
+            uint32_t* dst_row = reinterpret_cast<uint32_t*>(camera_plane_.map + y * camera_plane_.pitch);
+            const int src_y = std::min(ui_h - 1, (y * ui_h) / std::max(1, dst_h));
 
-        for (int y = 0; y < rot_h; y++) {
-            uint32_t* dst_row = reinterpret_cast<uint32_t*>(camera_plane_.map + (off_y + y) * camera_plane_.pitch) + off_x;
-
-            for (int x = 0; x < rot_w; x++) {
-                const int src_x = y;
-                const int src_y = ui_h - 1 - x;
+            for (int x = 0; x < dst_w; x++) {
+                const int src_x = std::min(ui_w - 1, (x * ui_w) / std::max(1, dst_w));
                 const uint32_t src = reinterpret_cast<const uint32_t*>(ui_plane_.map + src_y * ui_plane_.pitch)[src_x];
 
                 const uint8_t sa = static_cast<uint8_t>(src >> 24);

@@ -35,10 +35,16 @@ public:
 private:
     void reader_thread();
     std::string find_touch_device();
+    bool query_abs_ranges();
 
     int fd_ = -1;
     std::thread thread_;
     std::atomic<bool> running_{false};
+
+    int abs_min_x_ = 0;
+    int abs_max_x_ = 799;
+    int abs_min_y_ = 0;
+    int abs_max_y_ = 479;
 
     std::atomic<int> raw_x_{0};
     std::atomic<int> raw_y_{0};
