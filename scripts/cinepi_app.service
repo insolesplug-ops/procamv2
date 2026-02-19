@@ -1,0 +1,33 @@
+[Unit]
+Description=CinePi Camera Application
+After=network.target sound.target display-manager.service
+Wants=display-manager.service
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/cinepi_app
+ExecStart=/home/pi/cinepi_app/build/cinepi_app
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cinepi_app
+
+# Set environment for display
+Environment="DISPLAY=:0"
+Environment="XAUTHORITY=/home/pi/.Xauthority"
+
+# Allow access to hardware devices
+SupplementaryGroups=video,input,gpio
+
+# Resource limits for Pi 3A+ (512MB RAM)
+MemoryLimit=256M
+CPUQuota=80%
+
+# Security settings
+NoNewPrivileges=true
+
+[Install]
+WantedBy=graphical.target
