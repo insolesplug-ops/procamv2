@@ -119,20 +119,23 @@ TouchPoint TouchInput::read() {
     int phys_y = raw_y_.load(std::memory_order_acquire);
 
     // Normalize raw touch coordinates using device-reported ABS ranges.
-    int norm_x = 0;
-    int norm_y = 0;
-
+    // Each axis is independently normalised using its own physical range so
+    // DISPLAY_PHYS_W/H are not needed and the code works regardless of
+    // whether the display mode is landscape or portrait.
     int x_range = abs_max_x_ - abs_min_x_;
     int y_range = abs_max_y_ - abs_min_y_;
-    if (x_range <= 0) x_range = DISPLAY_PHYS_W - 1;
-    if (y_range <= 0) y_range = DISPLAY_PHYS_H - 1;
+    if (x_range <= 0) x_range = 4095;  // safe fallback
+    if (y_range <= 0) y_range = 4095;
 
-    norm_x = (phys_x - abs_min_x_) * (DISPLAY_PHYS_W - 1) / x_range;
-    norm_y = (phys_y - abs_min_y_) * (DISPLAY_PHYS_H - 1) / y_range;
+    // Raw offsets in [0, *_range]
+    int raw_ox = phys_x - abs_min_x_;
+    int raw_oy = phys_y - abs_min_y_;
 
-    // Rotate 90° clockwise: landscape -> portrait
-    tp.x = norm_y;
-    tp.y = (DISPLAY_H - 1) - norm_x;
+    // Rotate 90° clockwise: landscape physical -> portrait logical.
+    //   Logical X = physical Y (scaled to DISPLAY_W)
+    //   Logical Y = (DISPLAY_H-1) - physical X (scaled to DISPLAY_H)
+    tp.x = (int)((int64_t)raw_oy * (DISPLAY_W - 1) / y_range);
+    tp.y = (DISPLAY_H - 1) - (int)((int64_t)raw_ox * (DISPLAY_H - 1) / x_range);
     tp.pressed = pressed_.load();
 
     // Clamp

@@ -1,23 +1,33 @@
 #pragma once
 /**
  * CinePi Camera - Hardware & Display Constants
+ *
+ * Display physical mode as reported by KMS/DRM (after config.txt fix):
+ *   - Remove "display_lcd_rotate=1" from /boot/config.txt
+ *   - Add rotate=90 to dtoverlay=vc4-kms-dsi-generic line
+ *   - KMS will then report the connector as 480x800 natively
+ *
+ * Until config.txt is fixed the DRM mode will read as 800x480.
+ * drm_display.cpp reads the actual mode at runtime via drmModeGetConnector
+ * and stores it in mode_w_ / mode_h_.  The constants below describe the
+ * LOGICAL (portrait) coordinate system used by LVGL and the app.
  */
 
 #include <cstdint>
 
 namespace cinepi {
 
-// ─── Display ────────────────────────────────────────────────────────
-constexpr int DISPLAY_PHYS_W    = 800;   // Physical landscape
-constexpr int DISPLAY_PHYS_H    = 480;
-constexpr int DISPLAY_W         = 480;   // Logical portrait (after 90° CW rotation)
-constexpr int DISPLAY_H         = 800;
-constexpr int DISPLAY_BPP       = 16;    // RGB565
+// ─── Display (logical portrait) ─────────────────────────────────────
+constexpr int DISPLAY_W         = 480;   // Portrait width  (matches LVGL canvas)
+constexpr int DISPLAY_H         = 800;   // Portrait height (matches LVGL canvas)
 constexpr int UI_BPP            = 32;    // ARGB8888 for overlay plane
 
 // ─── Camera ─────────────────────────────────────────────────────────
-constexpr int PREVIEW_W         = 640;
-constexpr int PREVIEW_H         = 480;
+// After libcamera Transform::Rot90 the sensor's 640×480 landscape output
+// becomes 480×640 portrait.  These are the post-transform dimensions that
+// arrive in the DMA-BUF callback.
+constexpr int PREVIEW_W         = 480;   // Portrait width  after Rot90
+constexpr int PREVIEW_H         = 640;   // Portrait height after Rot90
 constexpr int PREVIEW_FPS       = 30;
 constexpr int CAPTURE_W         = 3280;
 constexpr int CAPTURE_H         = 2464;

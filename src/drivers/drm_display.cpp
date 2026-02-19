@@ -1,9 +1,32 @@
 /**
- * CinePi Camera - DRM/KMS Display Driver
- * Dual-plane compositing for Waveshare 4.3" DSI LCD
+ * CinePi Camera - DRM/KMS Display Driver (Zero-Copy, Dual-Plane)
  *
- * Plane 0 (primary): Camera preview via DMA-BUF import (zero-copy)
- * Plane 1 (overlay): LVGL UI framebuffer (ARGB8888 with alpha)
+ * PRIMARY plane  z=0  : libcamera DMA-BUF imported once per buffer fd,
+ *                       hardware scaler fills the full CRTC area.
+ *                       Zero memcpy, zero mmap of camera buffers.
+ *
+ * OVERLAY plane  z=10 : LVGL UI in an ARGB8888 dumb buffer.
+ *                       Double-buffered (front/back) to prevent tearing.
+ *                       alpha=0 pixels are transparent → camera shows through.
+ *
+ * Stride / format discipline:
+ *   Camera FB is registered with the EXACT stride reported by libcamera so
+ *   the display controller never mis-interprets the line pitch.
+ *   UI dumb-buffer pitch is supplied by the kernel (DRM_IOCTL_MODE_CREATE_DUMB)
+ *   and passed verbatim to drmModeAddFB2.
+ *
+ * Runtime mode detection:
+ *   mode_w_ / mode_h_ are read from the DRM connector at init time.
+ *   This means the code is correct both BEFORE and AFTER the
+ *   /boot/config.txt portrait-rotation fix.
+ *
+ * /boot/config.txt fix (do this once on the Pi):
+ *   REMOVE:  display_lcd_rotate=1          ← DispmanX only, breaks KMS
+ *   CHANGE:  dtoverlay=vc4-kms-dsi-generic,...
+ *   TO:      dtoverlay=vc4-kms-dsi-generic,...,rotate=90
+ *   (or add "video=DSI-1:480x800@60,rotate=90" to /boot/cmdline.txt)
+ *   After this the KMS connector will report 480×800 natively and
+ *   libcamera Transform::Rot90 is no longer needed either.
  */
 
 #include "drivers/drm_display.h"
@@ -13,11 +36,8 @@
 #include <cstring>
 #include <cstdio>
 #include <cerrno>
-#include <algorithm>
-#include <vector>
 #include <fcntl.h>
 #include <unistd.h>
-#include <sys/ioctl.h>
 #include <sys/mman.h>
 
 #include <xf86drm.h>
@@ -26,99 +46,87 @@
 
 namespace cinepi {
 
-// Track the GEM handle imported from DMA-BUF separately from dumb buffer handles.
-// This is file-scoped because the header does not expose it.
-static uint32_t s_camera_imported_gem_handle = 0;
-static std::vector<int> s_x_map;
-static std::vector<int> s_y_map;
-static int s_map_src_w = 0;
-static int s_map_src_h = 0;
-static int s_map_dst_w = 0;
-static int s_map_dst_h = 0;
-static int s_map_off_x = 0;
-static int s_map_off_y = 0;
+// ─── internal helper ─────────────────────────────────────────────────────────
 
-static void set_plane_zpos_if_available(int drm_fd, uint32_t plane_id, uint64_t zpos) {
-    drmModeObjectProperties* props = drmModeObjectGetProperties(drm_fd, plane_id, DRM_MODE_OBJECT_PLANE);
+static void set_plane_zpos(int fd, uint32_t plane_id, uint64_t zpos)
+{
+    drmModeObjectProperties *props =
+        drmModeObjectGetProperties(fd, plane_id, DRM_MODE_OBJECT_PLANE);
     if (!props) return;
-
     for (uint32_t i = 0; i < props->count_props; i++) {
-        drmModePropertyRes* prop = drmModeGetProperty(drm_fd, props->props[i]);
-        if (!prop) continue;
-
-        if (strcmp(prop->name, "zpos") == 0) {
-            drmModeObjectSetProperty(drm_fd, plane_id, DRM_MODE_OBJECT_PLANE, prop->prop_id, zpos);
-            drmModeFreeProperty(prop);
-            break;
+        drmModePropertyRes *p = drmModeGetProperty(fd, props->props[i]);
+        if (p) {
+            if (strcmp(p->name, "zpos") == 0)
+                drmModeObjectSetProperty(fd, plane_id,
+                                         DRM_MODE_OBJECT_PLANE,
+                                         p->prop_id, zpos);
+            drmModeFreeProperty(p);
         }
-
-        drmModeFreeProperty(prop);
     }
-
     drmModeFreeObjectProperties(props);
 }
 
-DrmDisplay::DrmDisplay() = default;
+// ─── ctor / dtor ─────────────────────────────────────────────────────────────
 
-DrmDisplay::~DrmDisplay() {
-    deinit();
-}
+DrmDisplay::DrmDisplay()  = default;
+DrmDisplay::~DrmDisplay() { deinit(); }
 
-bool DrmDisplay::init() {
-    // Open DRM device - try DSI first, then card0
-    const char* dev_paths[] = {"/dev/dri/card1", "/dev/dri/card0"};
+// ─── public: init / deinit ───────────────────────────────────────────────────
+
+bool DrmDisplay::init()
+{
+    // Prefer card1 (DSI), fall back to card0
+    const char *dev_paths[] = { "/dev/dri/card1", "/dev/dri/card0" };
     for (auto path : dev_paths) {
         drm_fd_ = open(path, O_RDWR | O_CLOEXEC);
         if (drm_fd_ >= 0) {
-            fprintf(stderr, "[DRM] Opened %s (fd=%d)\n", path, drm_fd_);
+            fprintf(stderr, "[DRM] opened %s (fd=%d)\n", path, drm_fd_);
             break;
         }
     }
     if (drm_fd_ < 0) {
-        fprintf(stderr, "[DRM] Failed to open DRM device: %s\n", strerror(errno));
+        fprintf(stderr, "[DRM] cannot open DRM device: %s\n", strerror(errno));
         return false;
     }
 
-    // Enable universal planes and atomic modesetting
-    if (drmSetClientCap(drm_fd_, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1) != 0) {
-        fprintf(stderr, "[DRM] Warning: universal planes not supported\n");
-    }
-    if (drmSetClientCap(drm_fd_, DRM_CLIENT_CAP_ATOMIC, 1) != 0) {
-        fprintf(stderr, "[DRM] Warning: atomic modesetting not supported, using legacy\n");
-    }
+    // Universal planes gives access to the PRIMARY plane via drmModeSetPlane
+    if (drmSetClientCap(drm_fd_, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1) != 0)
+        fprintf(stderr, "[DRM] WARNING: universal planes not available\n");
 
-    if (!find_crtc()) {
-        fprintf(stderr, "[DRM] Failed to find CRTC\n");
-        return false;
-    }
-
-    if (!setup_ui_plane()) {
-        fprintf(stderr, "[DRM] Failed to setup UI overlay plane\n");
-        return false;
-    }
+    if (!find_crtc())      return false;   // sets mode_w_, mode_h_
+    if (!alloc_ui_bufs())  return false;   // double-buffered ARGB overlay
+    discover_overlay_plane();              // ui_plane_id_
 
     initialized_ = true;
-    fprintf(stderr, "[DRM] Display initialized: %dx%d\n", DISPLAY_W, DISPLAY_H);
+    fprintf(stderr,
+            "[DRM] ready – mode %dx%d  cam_plane=%u  ui_plane=%u\n",
+            mode_w_, mode_h_, camera_plane_id_, ui_plane_id_);
     return true;
 }
 
-void DrmDisplay::deinit() {
+void DrmDisplay::deinit()
+{
     if (drm_fd_ < 0) return;
 
-    destroy_dumb_buffer(ui_plane_);
-    destroy_dumb_buffer(camera_plane_);
-
-    // Close any imported GEM handle from DMA-BUF
-    if (s_camera_imported_gem_handle) {
-        struct drm_gem_close gem_close = {};
-        gem_close.handle = s_camera_imported_gem_handle;
-        drmIoctl(drm_fd_, DRM_IOCTL_GEM_CLOSE, &gem_close);
-        s_camera_imported_gem_handle = 0;
+    // Release camera FB cache
+    for (auto &e : cam_fb_cache_) {
+        if (e.fb_id)      drmModeRmFB(drm_fd_, e.fb_id);
+        if (e.gem_handle) {
+            drm_gem_close gc{}; gc.handle = e.gem_handle;
+            drmIoctl(drm_fd_, DRM_IOCTL_GEM_CLOSE, &gc);
+        }
     }
+    cam_fb_cache_.clear();
 
-    if (camera_fb_id_) {
-        drmModeRmFB(drm_fd_, camera_fb_id_);
-        camera_fb_id_ = 0;
+    // Release UI double buffers
+    for (auto &b : ui_bufs_) destroy_dumb(b);
+
+    // Release blank seed buffer
+    if (blank_fb_id_) { drmModeRmFB(drm_fd_, blank_fb_id_); blank_fb_id_ = 0; }
+    if (blank_gem_)   {
+        drm_mode_destroy_dumb dd{}; dd.handle = blank_gem_;
+        drmIoctl(drm_fd_, DRM_IOCTL_MODE_DESTROY_DUMB, &dd);
+        blank_gem_ = 0;
     }
 
     close(drm_fd_);
@@ -126,396 +134,392 @@ void DrmDisplay::deinit() {
     initialized_ = false;
 }
 
-bool DrmDisplay::find_crtc() {
-    drmModeRes* res = drmModeGetResources(drm_fd_);
+// ─── public: UI buffer access ─────────────────────────────────────────────────
+// LVGL always writes into the BACK buffer.  commit() flips front/back.
+
+uint8_t *DrmDisplay::get_ui_buffer()
+{
+    return ui_bufs_[back_idx_].map;
+}
+
+int DrmDisplay::get_ui_pitch() const
+{
+    return static_cast<int>(ui_bufs_[back_idx_].pitch);
+}
+
+// ─── public: camera plane (zero-copy) ────────────────────────────────────────
+
+bool DrmDisplay::set_camera_dmabuf(int dmabuf_fd, int width, int height,
+                                    int stride, uint32_t drm_fourcc)
+{
+    if (drm_fd_ < 0 || !camera_plane_id_) return false;
+
+    CamFbEntry *e = get_or_import(dmabuf_fd, width, height, stride, drm_fourcc);
+    if (!e) return false;
+
+    // Hardware scaler: camera dimensions → full CRTC area.  Zero CPU cost.
+    int ret = drmModeSetPlane(drm_fd_, camera_plane_id_, crtc_id_,
+                               e->fb_id, 0,
+                               0, 0, mode_w_, mode_h_,         // dst
+                               0, 0, width << 16, height << 16); // src (16.16 fixed)
+    if (ret != 0) {
+        static bool warned = false;
+        if (!warned) {
+            fprintf(stderr, "[DRM] SetPlane(camera) failed: %s\n", strerror(errno));
+            warned = true;
+        }
+        return false;
+    }
+    return true;
+}
+
+// ─── public: commit (flip UI overlay) ────────────────────────────────────────
+// Presents the BACK buffer and makes the old FRONT the new BACK.
+
+bool DrmDisplay::commit()
+{
+    if (drm_fd_ < 0 || !ui_plane_id_) return true;
+
+    UiBuf &front = ui_bufs_[back_idx_];
+
+    // src: full logical DISPLAY_W × DISPLAY_H canvas
+    // dst: full CRTC scanout area (HW scales if mode != DISPLAY_W×DISPLAY_H)
+    int ret = drmModeSetPlane(drm_fd_, ui_plane_id_, crtc_id_,
+                               front.fb_id, 0,
+                               0, 0, mode_w_,    mode_h_,
+                               0, 0, DISPLAY_W << 16, DISPLAY_H << 16);
+    if (ret != 0) {
+        static bool warned = false;
+        if (!warned) {
+            fprintf(stderr, "[DRM] SetPlane(UI) failed: %s\n", strerror(errno));
+            warned = true;
+        }
+        return false;
+    }
+
+    // Flip: the just-displayed buffer becomes the new back buffer for LVGL to draw into
+    back_idx_ ^= 1;
+    return true;
+}
+
+// ─── public: backlight ───────────────────────────────────────────────────────
+
+void DrmDisplay::set_blank(bool blank)
+{
+    FILE *fp = fopen(BACKLIGHT_POWER, "w");
+    if (fp) { fprintf(fp, "%d", blank ? 4 : 0); fclose(fp); }
+
+    fp = fopen(BACKLIGHT_BRIGHTNESS, "w");
+    if (fp) {
+        int bri = blank ? 0 : ConfigManager::instance().get().display.brightness;
+        fprintf(fp, "%d", bri);
+        fclose(fp);
+    }
+}
+
+// ─── private: CRTC / mode setup ──────────────────────────────────────────────
+
+bool DrmDisplay::find_crtc()
+{
+    drmModeRes *res = drmModeGetResources(drm_fd_);
     if (!res) {
         fprintf(stderr, "[DRM] drmModeGetResources failed\n");
         return false;
     }
 
-    // Find the first connected connector (DSI display)
-    drmModeConnector* conn = nullptr;
-    for (int i = 0; i < res->count_connectors; i++) {
-        conn = drmModeGetConnector(drm_fd_, res->connectors[i]);
-        if (conn && conn->connection == DRM_MODE_CONNECTED && conn->count_modes > 0) {
-            connector_id_ = conn->connector_id;
-            break;
-        }
-        if (conn) {
-            drmModeFreeConnector(conn);
-            conn = nullptr;
+    // Pick the first connected connector that has at least one mode
+    drmModeConnector *conn = nullptr;
+    for (int i = 0; i < res->count_connectors && !conn; i++) {
+        drmModeConnector *c = drmModeGetConnector(drm_fd_, res->connectors[i]);
+        if (c && c->connection == DRM_MODE_CONNECTED && c->count_modes > 0) {
+            conn         = c;
+            connector_id_ = c->connector_id;
+        } else if (c) {
+            drmModeFreeConnector(c);
         }
     }
-
     if (!conn) {
-        fprintf(stderr, "[DRM] No connected display found\n");
+        fprintf(stderr, "[DRM] no connected display\n");
         drmModeFreeResources(res);
         return false;
     }
 
-    fprintf(stderr, "[DRM] Connector %u: %s, %d modes\n",
+    // Preferred mode first, else index 0
+    drmModeModeInfo mode = conn->modes[0];
+    for (int i = 0; i < conn->count_modes; i++)
+        if (conn->modes[i].type & DRM_MODE_TYPE_PREFERRED)
+            { mode = conn->modes[i]; break; }
+
+    mode_w_ = mode.hdisplay;
+    mode_h_ = mode.vdisplay;
+    fprintf(stderr, "[DRM] connector %u (%s) → mode %dx%d@%dHz\n",
             conn->connector_id,
             conn->connector_type == DRM_MODE_CONNECTOR_DSI ? "DSI" : "other",
-            conn->count_modes);
+            mode_w_, mode_h_, mode.vrefresh);
 
-    // Use the preferred mode or the first one
-    drmModeModeInfo mode = conn->modes[0];
-    for (int i = 0; i < conn->count_modes; i++) {
-        if (conn->modes[i].type & DRM_MODE_TYPE_PREFERRED) {
-            mode = conn->modes[i];
-            break;
-        }
-    }
-    fprintf(stderr, "[DRM] Mode: %dx%d @ %dHz\n", mode.hdisplay, mode.vdisplay, mode.vrefresh);
-
-    // Find encoder -> CRTC
+    // Resolve CRTC via attached encoder
     if (conn->encoder_id) {
-        drmModeEncoder* enc = drmModeGetEncoder(drm_fd_, conn->encoder_id);
+        drmModeEncoder *enc = drmModeGetEncoder(drm_fd_, conn->encoder_id);
         if (enc) {
-            crtc_id_ = enc->crtc_id;
+            crtc_id_    = enc->crtc_id;
             encoder_id_ = enc->encoder_id;
             drmModeFreeEncoder(enc);
         }
     }
-
-    // If no CRTC found via encoder, try all encoders
+    // Fallback: walk all encoders × CRTCs
     if (!crtc_id_) {
-        for (int i = 0; i < conn->count_encoders; i++) {
-            drmModeEncoder* enc = drmModeGetEncoder(drm_fd_, conn->encoders[i]);
+        for (int i = 0; i < conn->count_encoders && !crtc_id_; i++) {
+            drmModeEncoder *enc = drmModeGetEncoder(drm_fd_, conn->encoders[i]);
             if (!enc) continue;
             for (int j = 0; j < res->count_crtcs; j++) {
                 if (enc->possible_crtcs & (1u << j)) {
-                    crtc_id_ = res->crtcs[j];
+                    crtc_id_    = res->crtcs[j];
                     encoder_id_ = enc->encoder_id;
+                    crtc_idx_   = j;
                     drmModeFreeEncoder(enc);
-                    goto crtc_found;
+                    goto crtc_ok;
                 }
             }
             drmModeFreeEncoder(enc);
         }
     }
+    // Record CRTC index (needed for plane matching)
+    for (int i = 0; i < res->count_crtcs; i++)
+        if (res->crtcs[i] == crtc_id_) { crtc_idx_ = i; break; }
 
-crtc_found:
-    if (!crtc_id_) {
-        fprintf(stderr, "[DRM] No CRTC available\n");
-        drmModeFreeConnector(conn);
-        drmModeFreeResources(res);
-        return false;
-    }
-
-    // Find CRTC index
-    for (int i = 0; i < res->count_crtcs; i++) {
-        if (res->crtcs[i] == crtc_id_) {
-            crtc_idx_ = i;
-            break;
-        }
-    }
-
-    // Set mode on CRTC using legacy API as initial setup
-    // Primary framebuffer MUST match the mode dimensions (landscape)
-    // even though we'll display portrait via plane rotation
-    DrmPlane primary;
-    if (!create_dumb_buffer(primary, mode.hdisplay, mode.vdisplay, 32)) {
-        fprintf(stderr, "[DRM] Failed to create primary dumb buffer\n");
-        drmModeFreeConnector(conn);
-        drmModeFreeResources(res);
-        return false;
-    }
-
-    // Clear to black
-    memset(primary.map, 0, primary.size);
-
-    if (drmModeSetCrtc(drm_fd_, crtc_id_, primary.fb_id, 0, 0,
-                        &connector_id_, 1, &mode) != 0) {
-        fprintf(stderr, "[DRM] drmModeSetCrtc failed: %s\n", strerror(errno));
-        destroy_dumb_buffer(primary);
-        drmModeFreeConnector(conn);
-        drmModeFreeResources(res);
-        return false;
-    }
-
-    // Keep primary buffer for now (camera plane will replace it)
-    camera_plane_ = primary;
-
-    fprintf(stderr, "[DRM] CRTC %u configured (index %d)\n", crtc_id_, crtc_idx_);
-
+crtc_ok:
     drmModeFreeConnector(conn);
     drmModeFreeResources(res);
+
+    if (!crtc_id_) { fprintf(stderr, "[DRM] no CRTC\n"); return false; }
+    fprintf(stderr, "[DRM] CRTC %u (idx %d)\n", crtc_id_, crtc_idx_);
+
+    // ── Create a minimal black seed buffer to call drmModeSetCrtc ────────────
+    // This establishes the video mode.  The camera DMA-BUF takes over the
+    // primary plane from the first live frame onward.
+
+    drm_mode_create_dumb cd{};
+    cd.width  = mode_w_;
+    cd.height = mode_h_;
+    cd.bpp    = 32;
+    if (drmIoctl(drm_fd_, DRM_IOCTL_MODE_CREATE_DUMB, &cd) != 0) {
+        fprintf(stderr, "[DRM] CREATE_DUMB(seed) failed: %s\n", strerror(errno));
+        return false;
+    }
+    blank_gem_ = cd.handle;
+
+    // Zero-fill seed buffer
+    drm_mode_map_dumb md{}; md.handle = cd.handle;
+    if (drmIoctl(drm_fd_, DRM_IOCTL_MODE_MAP_DUMB, &md) == 0) {
+        void *p = mmap(nullptr, cd.size, PROT_WRITE, MAP_SHARED, drm_fd_, md.offset);
+        if (p != MAP_FAILED) { memset(p, 0, cd.size); munmap(p, cd.size); }
+    }
+
+    // Register seed FB (XRGB8888 – alpha channel ignored by primary plane)
+    uint32_t h[4] = {cd.handle}, s[4] = {cd.pitch}, o[4] = {0};
+    if (drmModeAddFB2(drm_fd_, mode_w_, mode_h_, DRM_FORMAT_XRGB8888,
+                       h, s, o, &blank_fb_id_, 0) != 0) {
+        fprintf(stderr, "[DRM] AddFB2(seed) failed: %s\n", strerror(errno));
+        return false;
+    }
+
+    // Set mode
+    if (drmModeSetCrtc(drm_fd_, crtc_id_, blank_fb_id_, 0, 0,
+                        &connector_id_, 1, &mode) != 0) {
+        fprintf(stderr, "[DRM] SetCrtc failed: %s\n", strerror(errno));
+        return false;
+    }
+    fprintf(stderr, "[DRM] mode set OK: %dx%d\n", mode_w_, mode_h_);
+
+    // Discover PRIMARY plane (camera)
+    camera_plane_id_ = find_plane_type(DRM_PLANE_TYPE_PRIMARY);
+    if (!camera_plane_id_)
+        fprintf(stderr, "[DRM] WARNING: no primary plane found\n");
+    else {
+        set_plane_zpos(drm_fd_, camera_plane_id_, 0);
+        fprintf(stderr, "[DRM] camera primary plane: %u\n", camera_plane_id_);
+    }
     return true;
 }
 
-uint32_t DrmDisplay::find_plane_for_layer(int layer_idx) {
-    drmModePlaneRes* plane_res = drmModeGetPlaneResources(drm_fd_);
-    if (!plane_res) return 0;
+// ─── private: UI overlay double-buffer allocation ────────────────────────────
 
-    int found = 0;
-    uint32_t result = 0;
-
-    for (uint32_t i = 0; i < plane_res->count_planes; i++) {
-        drmModePlane* plane = drmModeGetPlane(drm_fd_, plane_res->planes[i]);
-        if (!plane) continue;
-
-        if (plane->possible_crtcs & (1u << crtc_idx_)) {
-            // Check plane type via properties
-            drmModeObjectProperties* props = drmModeObjectGetProperties(
-                drm_fd_, plane->plane_id, DRM_MODE_OBJECT_PLANE);
-            if (props) {
-                for (uint32_t j = 0; j < props->count_props; j++) {
-                    drmModePropertyRes* prop = drmModeGetProperty(drm_fd_, props->props[j]);
-                    if (prop && strcmp(prop->name, "type") == 0) {
-                        uint64_t type_val = props->prop_values[j];
-                        // layer_idx 0 = primary, 1 = overlay
-                        if ((layer_idx == 0 && type_val == DRM_PLANE_TYPE_PRIMARY) ||
-                            (layer_idx == 1 && type_val == DRM_PLANE_TYPE_OVERLAY)) {
-                            result = plane->plane_id;
-                        }
-                        drmModeFreeProperty(prop);
-                        break;
-                    }
-                    if (prop) drmModeFreeProperty(prop);
-                }
-                drmModeFreeObjectProperties(props);
-            }
-            if (result) {
-                drmModeFreePlane(plane);
-                break;
-            }
+bool DrmDisplay::alloc_ui_bufs()
+{
+    for (int i = 0; i < 2; i++) {
+        if (!create_dumb(ui_bufs_[i], DISPLAY_W, DISPLAY_H, UI_BPP)) {
+            fprintf(stderr, "[DRM] alloc_ui_bufs: create_dumb[%d] failed\n", i);
+            return false;
         }
-        drmModeFreePlane(plane);
+        memset(ui_bufs_[i].map, 0, ui_bufs_[i].size); // fully transparent
     }
+    back_idx_ = 0;
+    fprintf(stderr, "[DRM] UI double buffers: ARGB8888 %dx%d pitch=%u\n",
+            DISPLAY_W, DISPLAY_H, ui_bufs_[0].pitch);
+    return true;
+}
 
-    drmModeFreePlaneResources(plane_res);
+// ─── private: overlay plane discovery ────────────────────────────────────────
+
+void DrmDisplay::discover_overlay_plane()
+{
+    ui_plane_id_ = find_plane_type(DRM_PLANE_TYPE_OVERLAY);
+    if (!ui_plane_id_) {
+        fprintf(stderr, "[DRM] no overlay plane – UI will not be visible\n");
+        return;
+    }
+    set_plane_zpos(drm_fd_, ui_plane_id_, 10);
+
+    // Initial placement of the back buffer (will be refreshed every commit())
+    drmModeSetPlane(drm_fd_, ui_plane_id_, crtc_id_,
+                    ui_bufs_[back_idx_].fb_id, 0,
+                    0, 0, mode_w_, mode_h_,
+                    0, 0, DISPLAY_W << 16, DISPLAY_H << 16);
+
+    fprintf(stderr, "[DRM] UI overlay plane: %u  ARGB8888 %dx%d (double-buffered)\n",
+            ui_plane_id_, DISPLAY_W, DISPLAY_H);
+}
+
+// ─── private: plane type query ────────────────────────────────────────────────
+
+uint32_t DrmDisplay::find_plane_type(uint32_t wanted_type)
+{
+    drmModePlaneRes *pr = drmModeGetPlaneResources(drm_fd_);
+    if (!pr) return 0;
+
+    uint32_t result = 0;
+    for (uint32_t i = 0; i < pr->count_planes && !result; i++) {
+        drmModePlane *pl = drmModeGetPlane(drm_fd_, pr->planes[i]);
+        if (!pl) continue;
+
+        // Must belong to our CRTC
+        if (!(pl->possible_crtcs & (1u << crtc_idx_))) {
+            drmModeFreePlane(pl); continue;
+        }
+
+        drmModeObjectProperties *props =
+            drmModeObjectGetProperties(drm_fd_, pl->plane_id,
+                                        DRM_MODE_OBJECT_PLANE);
+        if (props) {
+            for (uint32_t j = 0; j < props->count_props; j++) {
+                drmModePropertyRes *p = drmModeGetProperty(drm_fd_, props->props[j]);
+                if (p) {
+                    if (strcmp(p->name, "type") == 0 &&
+                        props->prop_values[j] == wanted_type)
+                        result = pl->plane_id;
+                    drmModeFreeProperty(p);
+                    if (result) break;
+                }
+            }
+            drmModeFreeObjectProperties(props);
+        }
+        drmModeFreePlane(pl);
+    }
+    drmModeFreePlaneResources(pr);
     return result;
 }
 
-bool DrmDisplay::setup_ui_plane() {
-    // Create UI overlay buffer: 480x800 ARGB8888
-    if (!create_dumb_buffer(ui_plane_, DISPLAY_W, DISPLAY_H, UI_BPP)) {
-        fprintf(stderr, "[DRM] Failed to create UI dumb buffer\n");
-        return false;
+// ─── private: DMA-BUF import cache ───────────────────────────────────────────
+// libcamera DMA-BUF fds are stable for the allocator's lifetime.
+// After the first CAMERA_BUF_COUNT frames every call is a cache hit → no
+// per-frame kernel ioctl overhead.
+
+DrmDisplay::CamFbEntry *
+DrmDisplay::get_or_import(int fd, int w, int h, int stride, uint32_t fourcc)
+{
+    // Cache lookup
+    for (auto &e : cam_fb_cache_)
+        if (e.dmabuf_fd == fd) return &e;
+
+    CamFbEntry entry{};
+    entry.dmabuf_fd = fd;
+
+    // Import DMA-BUF → GEM handle
+    if (drmPrimeFDToHandle(drm_fd_, fd, &entry.gem_handle) != 0) {
+        fprintf(stderr, "[DRM] PrimeFDToHandle(fd=%d) failed: %s\n",
+                fd, strerror(errno));
+        return nullptr;
     }
 
-    // Clear to transparent
-    memset(ui_plane_.map, 0, ui_plane_.size);
+    // Register DRM FB with the EXACT stride from libcamera.
+    // Getting this wrong causes the entire pixel-soup / stride mismatch.
+    uint32_t handles[4] = { entry.gem_handle };
+    uint32_t strides[4] = { static_cast<uint32_t>(stride) };  // ← exact!
+    uint32_t offsets[4] = { 0 };
 
-    // Prefer hardware overlay plane (much faster and more stable than
-    // software per-pixel composition on Pi 3A+).
-    uint32_t overlay_plane_id = find_plane_for_layer(1);
-    if (overlay_plane_id) {
-        ui_plane_.id = overlay_plane_id;
-        set_plane_zpos_if_available(drm_fd_, overlay_plane_id, 10);
-        fprintf(stderr, "[DRM] UI overlay plane: %u\n", overlay_plane_id);
-
-        if (drmModeSetPlane(drm_fd_, overlay_plane_id, crtc_id_,
-                            ui_plane_.fb_id, 0,
-                            0, 0, DISPLAY_PHYS_W, DISPLAY_PHYS_H,
-                            0, 0, DISPLAY_W << 16, DISPLAY_H << 16) != 0) {
-            fprintf(stderr, "[DRM] drmModeSetPlane for UI failed: %s\n", strerror(errno));
-            ui_plane_.id = 0;
-        }
-    }
-
-    if (!ui_plane_.id) {
-        fprintf(stderr, "[DRM] No usable UI overlay plane; UI may be limited\n");
-    }
-
-    return true;
-}
-
-uint8_t* DrmDisplay::get_ui_buffer() {
-    return ui_plane_.map;
-}
-
-int DrmDisplay::get_ui_pitch() const {
-    return static_cast<int>(ui_plane_.pitch);
-}
-
-bool DrmDisplay::set_camera_dmabuf(int dmabuf_fd, int width, int height,
-                                     int stride, uint32_t format) {
-    if (drm_fd_ < 0) return false;
-
-    if (!camera_plane_.map) {
-        fprintf(stderr, "[DRM] camera_plane_ map is null\n");
-        return false;
-    }
-
-    // DEBUG: Log first camera frame
-    static bool first_frame = true;
-    if (first_frame) {
-        fprintf(stderr, "[DRM] First camera frame: %dx%d stride=%d fmt=0x%x fd=%d\n",
-                width, height, stride, format, dmabuf_fd);
-        first_frame = false;
-    }
-
-    // Robust path: map camera dmabuf per frame and scale into full primary framebuffer.
-    const size_t src_size = static_cast<size_t>(stride) * static_cast<size_t>(height);
-    void* src_map = mmap(nullptr, src_size, PROT_READ, MAP_SHARED, dmabuf_fd, 0);
-    if (src_map == MAP_FAILED) {
-        fprintf(stderr, "[DRM] mmap(dmabuf) failed: %s\n", strerror(errno));
-        return false;
-    }
-
-    const int dst_w = camera_plane_.width;
-    const int dst_h = camera_plane_.height;
-    if (width <= 0 || height <= 0 || dst_w <= 0 || dst_h <= 0) {
-        return false;
-    }
-
-    // Cover scaling: fill full screen (no black bars / stale terminal strips).
-    const float scale_x = static_cast<float>(dst_w) / static_cast<float>(width);
-    const float scale_y = static_cast<float>(dst_h) / static_cast<float>(height);
-    const float scale = std::max(scale_x, scale_y);
-
-    const int out_w = std::max(1, static_cast<int>(width * scale));
-    const int out_h = std::max(1, static_cast<int>(height * scale));
-    const int dst_off_x = (dst_w - out_w) / 2;
-    const int dst_off_y = (dst_h - out_h) / 2;
-
-    if (s_map_src_w != width || s_map_src_h != height ||
-        s_map_dst_w != out_w || s_map_dst_h != out_h ||
-        s_map_off_x != dst_off_x || s_map_off_y != dst_off_y) {
-        s_x_map.assign(out_w, 0);
-        s_y_map.assign(out_h, 0);
-        for (int x = 0; x < out_w; x++) {
-            s_x_map[x] = std::min(width - 1, (x * width) / out_w);
-        }
-        for (int y = 0; y < out_h; y++) {
-            s_y_map[y] = std::min(height - 1, (y * height) / out_h);
-        }
-        s_map_src_w = width;
-        s_map_src_h = height;
-        s_map_dst_w = out_w;
-        s_map_dst_h = out_h;
-        s_map_off_x = dst_off_x;
-        s_map_off_y = dst_off_y;
-    }
-
-    for (int y = 0; y < out_h; y++) {
-        const int src_y = s_y_map[y];
-        const uint8_t* src_row = reinterpret_cast<const uint8_t*>(src_map) + src_y * stride;
-        uint32_t* dst_row = reinterpret_cast<uint32_t*>(camera_plane_.map + (dst_off_y + y) * camera_plane_.pitch) + dst_off_x;
-
-        for (int x = 0; x < out_w; x++) {
-            const int src_x = s_x_map[x];
-            const uint8_t* p = src_row + src_x * 3;
-            const uint8_t r = p[0];
-            const uint8_t g = p[1];
-            const uint8_t b = p[2];
-            dst_row[x] = (0xFFu << 24) | (static_cast<uint32_t>(r) << 16)
-                       | (static_cast<uint32_t>(g) << 8) | static_cast<uint32_t>(b);
-        }
-    }
-
-    munmap(src_map, src_size);
-
-    return true;
-}
-
-bool DrmDisplay::commit() {
-    if (drm_fd_ < 0) return false;
-
-    // DEBUG: Log first commit
-    static bool first_commit = true;
-    if (first_commit) {
-        fprintf(stderr, "[DRM] First commit() - ui_plane_.id=%u\n", ui_plane_.id);
-        first_commit = false;
-    }
-
-    // Refresh UI overlay plane each frame (hardware composition).
-    if (ui_plane_.id) {
-        int ret = drmModeSetPlane(drm_fd_, ui_plane_.id, crtc_id_,
-                                  ui_plane_.fb_id, 0,
-                                  0, 0, DISPLAY_PHYS_W, DISPLAY_PHYS_H,
-                                  0, 0, DISPLAY_W << 16, DISPLAY_H << 16);
-        if (ret != 0) {
-            fprintf(stderr, "[DRM] drmModeSetPlane failed in commit(): %s\n", strerror(errno));
-        }
-    }
-
-    // Page flip would be better but works for our refresh rate
-    return true;
-}
-
-void DrmDisplay::set_blank(bool blank) {
-    // Use backlight sysfs for blanking
-    FILE* fp = fopen(BACKLIGHT_POWER, "w");
-    if (fp) {
-        fprintf(fp, "%d", blank ? 4 : 0);  // 4=off, 0=on
-        fclose(fp);
-    }
-    fp = fopen(BACKLIGHT_BRIGHTNESS, "w");
-    if (fp) {
-        fprintf(fp, "%d", blank ? 0 : ConfigManager::instance().get().display.brightness);
-        fclose(fp);
-    }
-}
-
-bool DrmDisplay::create_dumb_buffer(DrmPlane& plane, int w, int h, int bpp) {
-    struct drm_mode_create_dumb create = {};
-    create.width = w;
-    create.height = h;
-    create.bpp = bpp;
-
-    if (drmIoctl(drm_fd_, DRM_IOCTL_MODE_CREATE_DUMB, &create) != 0) {
-        fprintf(stderr, "[DRM] Create dumb buffer failed: %s\n", strerror(errno));
-        return false;
-    }
-
-    plane.gem_handle = create.handle;
-    plane.pitch = create.pitch;
-    plane.size = create.size;
-    plane.width = w;
-    plane.height = h;
-
-    // Create framebuffer
-    uint32_t fb_format = (bpp == 32) ? DRM_FORMAT_ARGB8888 : DRM_FORMAT_RGB565;
-    uint32_t handles[4] = {create.handle, 0, 0, 0};
-    uint32_t strides[4] = {create.pitch, 0, 0, 0};
-    uint32_t offsets[4] = {0, 0, 0, 0};
-
-    if (drmModeAddFB2(drm_fd_, w, h, fb_format,
+    if (drmModeAddFB2(drm_fd_, w, h, fourcc,
                        handles, strides, offsets,
-                       &plane.fb_id, 0) != 0) {
-        fprintf(stderr, "[DRM] drmModeAddFB2 failed: %s\n", strerror(errno));
+                       &entry.fb_id, 0) != 0) {
+        fprintf(stderr,
+                "[DRM] AddFB2(camera %dx%d stride=%d fmt=0x%08x) failed: %s\n",
+                w, h, stride, fourcc, strerror(errno));
+        drm_gem_close gc{}; gc.handle = entry.gem_handle;
+        drmIoctl(drm_fd_, DRM_IOCTL_GEM_CLOSE, &gc);
+        return nullptr;
+    }
+
+    cam_fb_cache_.push_back(entry);
+    fprintf(stderr,
+            "[DRM] camera FB imported: fd=%d %dx%d stride=%d fmt=0x%08x → fb=%u\n",
+            fd, w, h, stride, fourcc, entry.fb_id);
+    return &cam_fb_cache_.back();
+}
+
+// ─── private: dumb buffer helpers ────────────────────────────────────────────
+
+bool DrmDisplay::create_dumb(UiBuf &b, int w, int h, int bpp)
+{
+    drm_mode_create_dumb cd{};
+    cd.width  = w;
+    cd.height = h;
+    cd.bpp    = bpp;
+
+    if (drmIoctl(drm_fd_, DRM_IOCTL_MODE_CREATE_DUMB, &cd) != 0) {
+        fprintf(stderr, "[DRM] CREATE_DUMB %dx%d@%d failed: %s\n",
+                w, h, bpp, strerror(errno));
+        return false;
+    }
+    b.gem_handle = cd.handle;
+    b.pitch      = cd.pitch;   // kernel-supplied – use verbatim in AddFB2
+    b.size       = cd.size;
+
+    // Register as DRM framebuffer.  ARGB8888 for overlay so alpha is respected.
+    uint32_t fmt     = (bpp == 32) ? DRM_FORMAT_ARGB8888 : DRM_FORMAT_RGB565;
+    uint32_t h4[4]   = { cd.handle };
+    uint32_t s4[4]   = { cd.pitch };   // verbatim kernel pitch → no stride mismatch
+    uint32_t o4[4]   = { 0 };
+
+    if (drmModeAddFB2(drm_fd_, w, h, fmt, h4, s4, o4, &b.fb_id, 0) != 0) {
+        fprintf(stderr, "[DRM] AddFB2 dumb %dx%d failed: %s\n",
+                w, h, strerror(errno));
         return false;
     }
 
-    // Memory map
-    struct drm_mode_map_dumb map_req = {};
-    map_req.handle = create.handle;
-    if (drmIoctl(drm_fd_, DRM_IOCTL_MODE_MAP_DUMB, &map_req) != 0) {
-        fprintf(stderr, "[DRM] Map dumb buffer failed: %s\n", strerror(errno));
+    // Memory-map for CPU writes (LVGL draws here)
+    drm_mode_map_dumb md{}; md.handle = cd.handle;
+    if (drmIoctl(drm_fd_, DRM_IOCTL_MODE_MAP_DUMB, &md) != 0) {
+        fprintf(stderr, "[DRM] MAP_DUMB failed: %s\n", strerror(errno));
         return false;
     }
-
-    plane.map = static_cast<uint8_t*>(
-        mmap(nullptr, create.size, PROT_READ | PROT_WRITE, MAP_SHARED,
-             drm_fd_, map_req.offset));
-    if (plane.map == MAP_FAILED) {
-        plane.map = nullptr;
-        fprintf(stderr, "[DRM] mmap failed: %s\n", strerror(errno));
+    b.map = static_cast<uint8_t *>(
+        mmap(nullptr, cd.size, PROT_READ | PROT_WRITE, MAP_SHARED,
+             drm_fd_, md.offset));
+    if (b.map == MAP_FAILED) {
+        b.map = nullptr;
+        fprintf(stderr, "[DRM] mmap dumb failed: %s\n", strerror(errno));
         return false;
     }
-
-    fprintf(stderr, "[DRM] Dumb buffer: %dx%d, %dbpp, pitch=%u, size=%llu\n",
-            w, h, bpp, create.pitch, (unsigned long long)create.size);
     return true;
 }
 
-void DrmDisplay::destroy_dumb_buffer(DrmPlane& plane) {
-    if (plane.map) {
-        munmap(plane.map, plane.size);
-        plane.map = nullptr;
-    }
-    if (plane.fb_id) {
-        drmModeRmFB(drm_fd_, plane.fb_id);
-        plane.fb_id = 0;
-    }
-    if (plane.gem_handle) {
-        struct drm_mode_destroy_dumb destroy = {};
-        destroy.handle = plane.gem_handle;
-        drmIoctl(drm_fd_, DRM_IOCTL_MODE_DESTROY_DUMB, &destroy);
-        plane.gem_handle = 0;
+void DrmDisplay::destroy_dumb(UiBuf &b)
+{
+    if (b.map)        { munmap(b.map, b.size); b.map = nullptr; }
+    if (b.fb_id)      { drmModeRmFB(drm_fd_, b.fb_id); b.fb_id = 0; }
+    if (b.gem_handle) {
+        drm_mode_destroy_dumb dd{}; dd.handle = b.gem_handle;
+        drmIoctl(drm_fd_, DRM_IOCTL_MODE_DESTROY_DUMB, &dd);
+        b.gem_handle = 0;
     }
 }
 

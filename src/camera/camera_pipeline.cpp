@@ -51,13 +51,18 @@ bool CameraPipeline::init() {
     }
 
     StreamConfiguration& stream_cfg = config_->at(0);
-    stream_cfg.size = Size(PREVIEW_W, PREVIEW_H);
-    stream_cfg.pixelFormat = formats::RGB888;
+    // Request portrait dimensions (after Rot90 the ISP delivers 480x640).
+    stream_cfg.size        = Size(PREVIEW_W, PREVIEW_H);  // 480x640
+    // XBGR8888: 32bpp packed, stride = width*4, directly importable as
+    // DRM_FORMAT_XBGR8888 – no CPU conversion needed.
+    stream_cfg.pixelFormat = formats::XBGR8888;
     stream_cfg.bufferCount = CAMERA_BUF_COUNT;
 
-    // Portrait rotation handled by DRM display driver
-    // Not setting cam config transform - may not be available in all libcamera versions
-    // config_->transform = Transform::Rot90;
+    // Hardware rotation: ISP rotates the sensor's landscape readout 90 degrees
+    // CW so the delivered buffers are already in portrait orientation.
+    // If the pipeline does not support this transform it will be adjusted to
+    // Identity and we log a warning below.
+    config_->transform = Transform::Rot90;
 
     CameraConfiguration::Status status = config_->validate();
     if (status == CameraConfiguration::Invalid) {
@@ -65,9 +70,13 @@ bool CameraPipeline::init() {
         return false;
     }
     if (status == CameraConfiguration::Adjusted) {
-        fprintf(stderr, "[Camera] Configuration adjusted: %s %dx%d\n",
+        fprintf(stderr, "[Camera] Configuration adjusted: %s %dx%d (transform=%s)\n",
                 stream_cfg.pixelFormat.toString().c_str(),
-                stream_cfg.size.width, stream_cfg.size.height);
+                stream_cfg.size.width, stream_cfg.size.height,
+                transformToString(config_->transform).c_str());
+        if (config_->transform != Transform::Rot90)
+            fprintf(stderr, "[Camera] WARNING: Rot90 not supported – "
+                            "output will be landscape, not portrait\n");
     }
 
     if (camera_->configure(config_.get()) != 0) {
@@ -171,8 +180,9 @@ void CameraPipeline::request_complete(Request* request) {
         int w = config_->at(0).size.width;
         int h = config_->at(0).size.height;
 
-        // DRM_FORMAT_RGB888 = 0x34324752
-        frame_cb_(fd, w, h, stride, 0x34324752);
+        // DRM_FORMAT_XBGR8888 = fourcc('X','B','2','4') = 0x34324258
+        // 32bpp, stride = width * 4.  Matches DRM primary plane natively.
+        frame_cb_(fd, w, h, stride, 0x34324258);
     }
 
     // Re-queue the request
