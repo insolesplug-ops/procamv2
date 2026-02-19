@@ -13,6 +13,7 @@
 #include <cstring>
 #include <cstdio>
 #include <cerrno>
+#include <algorithm>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
@@ -304,37 +305,10 @@ bool DrmDisplay::set_camera_dmabuf(int dmabuf_fd, int width, int height,
                                      int stride, uint32_t format) {
     if (drm_fd_ < 0) return false;
 
-    // Remove old FB if exists
-    if (camera_fb_id_) {
-        drmModeRmFB(drm_fd_, camera_fb_id_);
-        camera_fb_id_ = 0;
-    }
-
-    // Close the previously imported GEM handle to prevent handle leak.
-    // Each drmPrimeFDToHandle call creates a new GEM handle that must be
-    // explicitly closed when no longer needed.
-    if (s_camera_imported_gem_handle) {
-        struct drm_gem_close gem_close = {};
-        gem_close.handle = s_camera_imported_gem_handle;
-        drmIoctl(drm_fd_, DRM_IOCTL_GEM_CLOSE, &gem_close);
-        s_camera_imported_gem_handle = 0;
-    }
-
-    // On the first call, the initial dumb buffer (black screen) is still alive
-    // in camera_plane_. Destroy it now since we are switching to imported DMA-BUFs.
-    if (camera_plane_.gem_handle) {
-        destroy_dumb_buffer(camera_plane_);
-    }
-
-    // Import DMA-BUF as a GEM handle
-    uint32_t gem_handle = 0;
-    if (drmPrimeFDToHandle(drm_fd_, dmabuf_fd, &gem_handle) != 0) {
-        fprintf(stderr, "[DRM] drmPrimeFDToHandle failed: %s\n", strerror(errno));
+    if (!camera_plane_.map) {
+        fprintf(stderr, "[DRM] camera_plane_ map is null\n");
         return false;
     }
-
-    // Track the imported handle so we can close it on the next frame or at deinit
-    s_camera_imported_gem_handle = gem_handle;
 
     // DEBUG: Log first camera frame
     static bool first_frame = true;
@@ -344,39 +318,32 @@ bool DrmDisplay::set_camera_dmabuf(int dmabuf_fd, int width, int height,
         first_frame = false;
     }
 
-    // Create framebuffer from GEM handle
-    uint32_t handles[4] = {gem_handle, 0, 0, 0};
-    uint32_t strides[4] = {static_cast<uint32_t>(stride), 0, 0, 0};
-    uint32_t offsets[4] = {0, 0, 0, 0};
-
-    if (drmModeAddFB2(drm_fd_, width, height, format,
-                       handles, strides, offsets,
-                       &camera_fb_id_, 0) != 0) {
-        fprintf(stderr, "[DRM] drmModeAddFB2 failed: %s\n", strerror(errno));
-        // Clean up the imported handle on failure
-        struct drm_gem_close gem_close = {};
-        gem_close.handle = gem_handle;
-        drmIoctl(drm_fd_, DRM_IOCTL_GEM_CLOSE, &gem_close);
-        s_camera_imported_gem_handle = 0;
+    // Robust path: mmap camera dmabuf and copy RGB888 -> XRGB8888 into
+    // the primary dumb buffer already bound to the CRTC.
+    const size_t src_size = static_cast<size_t>(stride) * static_cast<size_t>(height);
+    void* src_map = mmap(nullptr, src_size, PROT_READ, MAP_SHARED, dmabuf_fd, 0);
+    if (src_map == MAP_FAILED) {
+        fprintf(stderr, "[DRM] mmap(dmabuf) failed: %s\n", strerror(errno));
         return false;
     }
 
-    // Set on primary plane - use physical display dimensions
-    uint32_t primary_plane_id = find_plane_for_layer(0);
-    if (primary_plane_id) {
-        int ret = drmModeSetPlane(drm_fd_, primary_plane_id, crtc_id_,
-                        camera_fb_id_, 0,
-                        0, 0, DISPLAY_PHYS_W, DISPLAY_PHYS_H,   // physical screen
-                        0, 0, width << 16, height << 16);
-        if (ret != 0) {
-            fprintf(stderr, "[DRM] drmModeSetPlane for camera failed: %s\n", strerror(errno));
+    const int copy_w = std::min(width, camera_plane_.width);
+    const int copy_h = std::min(height, camera_plane_.height);
+
+    for (int y = 0; y < copy_h; y++) {
+        const uint8_t* src_row = reinterpret_cast<const uint8_t*>(src_map) + y * stride;
+        uint32_t* dst_row = reinterpret_cast<uint32_t*>(camera_plane_.map + y * camera_plane_.pitch);
+
+        for (int x = 0; x < copy_w; x++) {
+            const uint8_t r = src_row[x * 3 + 0];
+            const uint8_t g = src_row[x * 3 + 1];
+            const uint8_t b = src_row[x * 3 + 2];
+            dst_row[x] = (0xFFu << 24) | (static_cast<uint32_t>(r) << 16)
+                       | (static_cast<uint32_t>(g) << 8) | static_cast<uint32_t>(b);
         }
-    } else {
-        // Fallback: set on CRTC directly
-        fprintf(stderr, "[DRM] No primary plane found, using CRTC fallback\n");
-        drmModeSetCrtc(drm_fd_, crtc_id_, camera_fb_id_, 0, 0,
-                        &connector_id_, 1, nullptr);
     }
+
+    munmap(src_map, src_size);
 
     return true;
 }
