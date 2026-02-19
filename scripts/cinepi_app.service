@@ -1,7 +1,7 @@
 [Unit]
 Description=CinePi Camera Application
-After=multi-user.target
-Wants=network.target
+After=network-online.target ssh.service
+Wants=network-online.target
 
 [Service]
 Type=simple
@@ -10,13 +10,13 @@ Group=pi
 WorkingDirectory=/home/pi/cinepi_app
 
 # Wait for hardware to be ready before starting
-ExecStartPre=/bin/sleep 3
+ExecStartPre=/bin/sleep 5
 
 # Start the app
 ExecStart=/home/pi/cinepi_app/build/cinepi_app
 
 Restart=on-failure
-RestartSec=5
+RestartSec=10
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=cinepi_app
@@ -32,4 +32,7 @@ CPUQuota=80%
 NoNewPrivileges=true
 
 [Install]
+# IMPORTANT: Do NOT enable this in graphical.target
+# If SSH cannot start, you lose access to the Pi!
+# Instead manually start with: sudo systemctl start cinepi_app
 WantedBy=multi-user.target
