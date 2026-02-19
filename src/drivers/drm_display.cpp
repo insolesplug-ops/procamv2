@@ -14,7 +14,6 @@
 #include <cstdio>
 #include <cerrno>
 #include <algorithm>
-#include <unordered_map>
 #include <vector>
 #include <fcntl.h>
 #include <unistd.h>
@@ -30,7 +29,6 @@ namespace cinepi {
 // Track the GEM handle imported from DMA-BUF separately from dumb buffer handles.
 // This is file-scoped because the header does not expose it.
 static uint32_t s_camera_imported_gem_handle = 0;
-static std::unordered_map<int, std::pair<void*, size_t>> s_dmabuf_maps;
 static std::vector<int> s_x_map;
 static std::vector<int> s_y_map;
 static int s_map_src_w = 0;
@@ -122,13 +120,6 @@ void DrmDisplay::deinit() {
         drmModeRmFB(drm_fd_, camera_fb_id_);
         camera_fb_id_ = 0;
     }
-
-    for (auto& kv : s_dmabuf_maps) {
-        if (kv.second.first && kv.second.first != MAP_FAILED) {
-            munmap(kv.second.first, kv.second.second);
-        }
-    }
-    s_dmabuf_maps.clear();
 
     close(drm_fd_);
     drm_fd_ = -1;
@@ -307,10 +298,26 @@ bool DrmDisplay::setup_ui_plane() {
     // Clear to transparent
     memset(ui_plane_.map, 0, ui_plane_.size);
 
-    // Always use software compositing for UI on top of primary framebuffer.
-    // This avoids plane ordering/alpha quirks on some Pi KMS stacks.
-    ui_plane_.id = 0;
-    fprintf(stderr, "[DRM] UI software composition enabled\n");
+    // Prefer hardware overlay plane (much faster and more stable than
+    // software per-pixel composition on Pi 3A+).
+    uint32_t overlay_plane_id = find_plane_for_layer(1);
+    if (overlay_plane_id) {
+        ui_plane_.id = overlay_plane_id;
+        set_plane_zpos_if_available(drm_fd_, overlay_plane_id, 10);
+        fprintf(stderr, "[DRM] UI overlay plane: %u\n", overlay_plane_id);
+
+        if (drmModeSetPlane(drm_fd_, overlay_plane_id, crtc_id_,
+                            ui_plane_.fb_id, 0,
+                            0, 0, DISPLAY_PHYS_W, DISPLAY_PHYS_H,
+                            0, 0, DISPLAY_W << 16, DISPLAY_H << 16) != 0) {
+            fprintf(stderr, "[DRM] drmModeSetPlane for UI failed: %s\n", strerror(errno));
+            ui_plane_.id = 0;
+        }
+    }
+
+    if (!ui_plane_.id) {
+        fprintf(stderr, "[DRM] No usable UI overlay plane; UI may be limited\n");
+    }
 
     return true;
 }
@@ -340,20 +347,12 @@ bool DrmDisplay::set_camera_dmabuf(int dmabuf_fd, int width, int height,
         first_frame = false;
     }
 
-    // Robust path: map camera dmabuf and scale into full primary framebuffer.
+    // Robust path: map camera dmabuf per frame and scale into full primary framebuffer.
     const size_t src_size = static_cast<size_t>(stride) * static_cast<size_t>(height);
-    void* src_map = nullptr;
-
-    auto map_it = s_dmabuf_maps.find(dmabuf_fd);
-    if (map_it == s_dmabuf_maps.end()) {
-        src_map = mmap(nullptr, src_size, PROT_READ, MAP_SHARED, dmabuf_fd, 0);
-        if (src_map == MAP_FAILED) {
-            fprintf(stderr, "[DRM] mmap(dmabuf) failed: %s\n", strerror(errno));
-            return false;
-        }
-        s_dmabuf_maps.emplace(dmabuf_fd, std::make_pair(src_map, src_size));
-    } else {
-        src_map = map_it->second.first;
+    void* src_map = mmap(nullptr, src_size, PROT_READ, MAP_SHARED, dmabuf_fd, 0);
+    if (src_map == MAP_FAILED) {
+        fprintf(stderr, "[DRM] mmap(dmabuf) failed: %s\n", strerror(errno));
+        return false;
     }
 
     const int dst_w = camera_plane_.width;
@@ -407,6 +406,8 @@ bool DrmDisplay::set_camera_dmabuf(int dmabuf_fd, int width, int height,
         }
     }
 
+    munmap(src_map, src_size);
+
     return true;
 }
 
@@ -420,47 +421,14 @@ bool DrmDisplay::commit() {
         first_commit = false;
     }
 
-    // Software-composite UI buffer over primary camera buffer.
-    if (camera_plane_.map && ui_plane_.map) {
-        const int dst_w = camera_plane_.width;
-        const int dst_h = camera_plane_.height;
-        const int ui_w = DISPLAY_W;
-        const int ui_h = DISPLAY_H;
-
-        // Scale UI directly to the current scanout size.
-        // This avoids rotation/offset assumptions that caused shifted/cut UI
-        // on different DSI + firmware rotation combinations.
-        for (int y = 0; y < dst_h; y++) {
-            uint32_t* dst_row = reinterpret_cast<uint32_t*>(camera_plane_.map + y * camera_plane_.pitch);
-            const int src_y = std::min(ui_h - 1, (y * ui_h) / std::max(1, dst_h));
-
-            for (int x = 0; x < dst_w; x++) {
-                const int src_x = std::min(ui_w - 1, (x * ui_w) / std::max(1, dst_w));
-                const uint32_t src = reinterpret_cast<const uint32_t*>(ui_plane_.map + src_y * ui_plane_.pitch)[src_x];
-
-                const uint8_t sa = static_cast<uint8_t>(src >> 24);
-                if (sa == 0) continue;
-
-                if (sa == 255) {
-                    dst_row[x] = (0xFFu << 24) | (src & 0x00FFFFFFu);
-                    continue;
-                }
-
-                const uint8_t sr = static_cast<uint8_t>((src >> 16) & 0xFF);
-                const uint8_t sg = static_cast<uint8_t>((src >> 8) & 0xFF);
-                const uint8_t sb = static_cast<uint8_t>(src & 0xFF);
-
-                uint32_t& dst = dst_row[x];
-                const uint8_t dr = static_cast<uint8_t>((dst >> 16) & 0xFF);
-                const uint8_t dg = static_cast<uint8_t>((dst >> 8) & 0xFF);
-                const uint8_t db = static_cast<uint8_t>(dst & 0xFF);
-
-                const uint8_t out_r = static_cast<uint8_t>((sr * sa + dr * (255 - sa)) / 255);
-                const uint8_t out_g = static_cast<uint8_t>((sg * sa + dg * (255 - sa)) / 255);
-                const uint8_t out_b = static_cast<uint8_t>((sb * sa + db * (255 - sa)) / 255);
-                dst = (0xFFu << 24) | (static_cast<uint32_t>(out_r) << 16)
-                    | (static_cast<uint32_t>(out_g) << 8) | static_cast<uint32_t>(out_b);
-            }
+    // Refresh UI overlay plane each frame (hardware composition).
+    if (ui_plane_.id) {
+        int ret = drmModeSetPlane(drm_fd_, ui_plane_.id, crtc_id_,
+                                  ui_plane_.fb_id, 0,
+                                  0, 0, DISPLAY_PHYS_W, DISPLAY_PHYS_H,
+                                  0, 0, DISPLAY_W << 16, DISPLAY_H << 16);
+        if (ret != 0) {
+            fprintf(stderr, "[DRM] drmModeSetPlane failed in commit(): %s\n", strerror(errno));
         }
     }
 

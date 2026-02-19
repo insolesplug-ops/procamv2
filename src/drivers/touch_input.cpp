@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cerrno>
+#include <cctype>
 #include <dirent.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -35,10 +36,12 @@ std::string TouchInput::find_touch_device() {
     if (!dir) return "";
 
     struct dirent* ent;
+    std::string first_event_fallback;
     while ((ent = readdir(dir)) != nullptr) {
         if (strncmp(ent->d_name, "event", 5) != 0) continue;
 
         std::string path = std::string("/dev/input/") + ent->d_name;
+        if (first_event_fallback.empty()) first_event_fallback = path;
         int fd = open(path.c_str(), O_RDONLY | O_NONBLOCK);
         if (fd < 0) continue;
 
@@ -58,8 +61,21 @@ std::string TouchInput::find_touch_device() {
             closedir(dir);
             return path;
         }
+
+        // Fallback: accept devices that identify as touchscreen in name.
+        std::string lower_name = name;
+        for (char& c : lower_name) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+        if (lower_name.find("touch") != std::string::npos) {
+            fprintf(stderr, "[Touch] Fallback touch device by name: %s (%s)\n", path.c_str(), name);
+            closedir(dir);
+            return path;
+        }
     }
     closedir(dir);
+    if (!first_event_fallback.empty()) {
+        fprintf(stderr, "[Touch] Fallback to first input event: %s\n", first_event_fallback.c_str());
+        return first_event_fallback;
+    }
     return "";
 }
 
