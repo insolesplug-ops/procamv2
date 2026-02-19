@@ -137,8 +137,8 @@ tokens.txt
 *.img
 *.elf
 
-# Floating Point Dumps
-core
-core.*
-vgcore.*
+# Floating Point Dumps (core files only, not src/core/ directory)
+/core
+/core.*
+/vgcore.*
 ```
