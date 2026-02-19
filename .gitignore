@@ -1,0 +1,144 @@
+# Build Artifacts
+/build/
+/CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+*.cmake
+*.a
+*.so
+*.o
+*.obj
+*.exe
+cinepi_app
+
+# IDE & Editor
+.vscode/
+.idea/
+.clion.source.nosync/
+*.swp
+*.swo
+*~
+.DS_Store
+.directory
+Thumbs.db
+*.sublime-project
+*.sublime-workspace
+*.code-workspace
+
+# Dependencies (if local)
+/lvgl/
+/third_party/
+/vendor/
+
+# Logs & Temporary
+*.log
+logs/
+tmp/
+temp/
+*.tmp
+.tmp/
+
+# Configuration (local/sensitive)
+.cinepi_config.json
+.env
+.env.local
+*.backup
+*.bak
+
+# Distribution
+dist/
+release/
+packaging/
+
+# Generated Documentation
+/doc/html/
+/doc/latex/
+doxygen_warnings.txt
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+
+# Test Coverage
+.coverage
+coverage/
+*.gcov
+*.gcda
+*.gcno
+
+# Valgrind
+*.callgrind.out
+*.massif.out
+
+# OS Specific
+.DS_Store
+.AppleDouble
+.LSOverride
+*.swp
+*.swo
+*~
+.directory
+
+# Assembly/Debug (if generated)
+*.s
+*.asm
+
+# Compiled Executables (except final binary)
+src/**/*.o
+src/**/*.a
+
+# Test Executables
+test_*
+*_test
+tests/bin/
+
+# Package Managers
+.apt_cache/
+*.deb
+*.rpm
+
+# CI/CD Local
+.github/secrets.json
+.github/*.backup
+
+# Backup Files
+*~
+*.swp
+*.swo
+*.bak
+*.backup
+*.orig
+
+# Shell History
+.bash_history
+.zsh_history
+
+# Git
+.git/
+.gitconfig.local
+
+# Remote Development
+.ssh/
+.cache/
+
+# Sensitive Data (NEVER commit)
+private_keys/
+secrets/
+credentials.json
+tokens.txt
+
+# Large Files
+*.iso
+*.bin
+*.img
+*.elf
+
+# Floating Point Dumps
+core
+core.*
+vgcore.*
+```

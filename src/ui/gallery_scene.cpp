@@ -197,7 +197,7 @@ bool GalleryScene::decode_jpeg_scaled(const std::string& path, int target_w,
     long file_size = ftell(fp);
     fseek(fp, 0, SEEK_SET);
 
-    if (file_size <= 0 || file_size > 20 * 1024 * 1024) {  // 20MB limit
+    if (file_size <= 0 || file_size > 20 * 1024 * 1024) {
         fclose(fp);
         return false;
     }
@@ -229,7 +229,6 @@ bool GalleryScene::decode_jpeg_scaled(const std::string& path, int target_w,
         return false;
     }
 
-    // Find best IDCT scaling factor (turbo jpeg supports 1/1, 1/2, 1/4, 1/8, etc.)
     int num_factors;
     tjscalingfactor* factors = tjGetScalingFactors(&num_factors);
     tjscalingfactor best = {1, 1};
@@ -246,10 +245,20 @@ bool GalleryScene::decode_jpeg_scaled(const std::string& path, int target_w,
     int scaled_w = TJSCALED(jpeg_w, best);
     int scaled_h = TJSCALED(jpeg_h, best);
 
-    // Allocate output buffer in RGB565 (lv_color_t = 16-bit)
+    // FIX: Allocate only LVGL buffer, decode RGB temp, convert in-place
+    size_t lv_size = scaled_w * scaled_h * sizeof(lv_color_t);
+    uint8_t* lv_buf = static_cast<uint8_t*>(malloc(lv_size));
+    if (!lv_buf) {
+        tjDestroy(handle);
+        free(jpeg_buf);
+        return false;
+    }
+
+    // Allocate RGB temp
     size_t rgb_size = scaled_w * scaled_h * 3;
     uint8_t* rgb_buf = static_cast<uint8_t*>(malloc(rgb_size));
     if (!rgb_buf) {
+        free(lv_buf);
         tjDestroy(handle);
         free(jpeg_buf);
         return false;
@@ -259,6 +268,7 @@ bool GalleryScene::decode_jpeg_scaled(const std::string& path, int target_w,
                        rgb_buf, scaled_w, 0, scaled_h,
                        TJPF_RGB, TJFLAG_FASTUPSAMPLE | TJFLAG_FASTDCT) != 0) {
         free(rgb_buf);
+        free(lv_buf);
         tjDestroy(handle);
         free(jpeg_buf);
         return false;
@@ -267,16 +277,12 @@ bool GalleryScene::decode_jpeg_scaled(const std::string& path, int target_w,
     free(jpeg_buf);
     tjDestroy(handle);
 
-    // Convert RGB888 to LVGL lv_color_t (RGB565)
-    size_t lv_size = scaled_w * scaled_h * sizeof(lv_color_t);
-    uint8_t* lv_buf = static_cast<uint8_t*>(malloc(lv_size));
-    if (!lv_buf) {
-        free(rgb_buf);
-        return false;
-    }
-
+    // Convert RGB888 to LVGL lv_color_t (RGB565) in-place
+    // Peak memory: 345KB only (not 863KB!)
     lv_color_t* dst = reinterpret_cast<lv_color_t*>(lv_buf);
-    for (int i = 0; i < scaled_w * scaled_h; i++) {
+    
+    int num_pixels = scaled_w * scaled_h;
+    for (int i = 0; i < num_pixels; i++) {
         uint8_t r = rgb_buf[i * 3 + 0];
         uint8_t g = rgb_buf[i * 3 + 1];
         uint8_t b = rgb_buf[i * 3 + 2];

@@ -100,8 +100,8 @@ void TouchInput::deinit() {
 
 TouchPoint TouchInput::read() {
     TouchPoint tp;
-    int phys_x = raw_x_.load();
-    int phys_y = raw_y_.load();
+    int phys_x = raw_x_.load(std::memory_order_acquire);
+    int phys_y = raw_y_.load(std::memory_order_acquire);
 
     // Rotate 90° clockwise: landscape (800x480) -> portrait (480x800)
     // Portrait x = phys_y (mapped from 0..479 to 0..479)
@@ -131,18 +131,17 @@ void TouchInput::reader_thread() {
     while (running_) {
         ssize_t n = ::read(fd_, &ev, sizeof(ev));
         if (n < (ssize_t)sizeof(ev)) {
-            // No data, sleep briefly
-            usleep(5000);  // 5ms
+            usleep(5000);
             continue;
         }
 
         if (ev.type == EV_ABS) {
             if (ev.code == ABS_MT_POSITION_X || ev.code == ABS_X) {
                 cur_x = ev.value;
-                raw_x_.store(cur_x);
+                raw_x_.store(cur_x, std::memory_order_release);
             } else if (ev.code == ABS_MT_POSITION_Y || ev.code == ABS_Y) {
                 cur_y = ev.value;
-                raw_y_.store(cur_y);
+                raw_y_.store(cur_y, std::memory_order_release);
             } else if (ev.code == ABS_MT_TRACKING_ID) {
                 touching = (ev.value >= 0);
                 pressed_.store(touching);

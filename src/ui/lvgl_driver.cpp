@@ -34,20 +34,20 @@ LvglDriver::~LvglDriver() {
     deinit();
 }
 
-bool LvglDriver::init(DrmDisplay& display, TouchInput& touch) {
+bool LvglDriver::init(DrmDisplay& display, TouchInput* touch) {
     display_ = &display;
-    touch_ = &touch;
+    touch_ = touch;
     g_display = &display;
-    g_touch = &touch;
+    g_touch = touch;
     g_start_ms = get_ms();
 
     // Initialize LVGL
     lv_init();
 
-    // Allocate draw buffers (double-buffered, partial rendering)
+    // Allocate draw buffers as lv_color_t arrays, stored as void* (matching header)
     uint32_t buf_size = DISPLAY_W * LVGL_BUF_LINES;
-    buf1_ = static_cast<uint16_t*>(malloc(buf_size * sizeof(lv_color_t)));
-    buf2_ = static_cast<uint16_t*>(malloc(buf_size * sizeof(lv_color_t)));
+    buf1_ = static_cast<void*>(malloc(buf_size * sizeof(lv_color_t)));
+    buf2_ = static_cast<void*>(malloc(buf_size * sizeof(lv_color_t)));
     if (!buf1_ || !buf2_) {
         fprintf(stderr, "[LVGL] Buffer allocation failed\n");
         return false;
@@ -116,6 +116,16 @@ void LvglDriver::flush_cb(lv_disp_drv_t* drv, const lv_area_t* area,
         return;
     }
 
+    // Query the active screen's background opacity and color from the LVGL
+    // object tree.  When bg_opa is transparent, pixels matching the screen
+    // background color are written with the screen's opacity so the camera
+    // feed shows through.  All other pixels (actual UI content) get full
+    // opacity, which means genuinely-black widgets render correctly.
+    lv_obj_t* scr = lv_scr_act();
+    lv_opa_t  scr_bg_opa   = lv_obj_get_style_bg_opa(scr, LV_PART_MAIN);
+    lv_color_t scr_bg_color = lv_obj_get_style_bg_color(scr, LV_PART_MAIN);
+    uint16_t  bg_raw        = scr_bg_color.full;
+
     // Copy rendered area to ARGB8888 framebuffer
     int w = area->x2 - area->x1 + 1;
     int h = area->y2 - area->y1 + 1;
@@ -131,10 +141,14 @@ void LvglDriver::flush_cb(lv_disp_drv_t* drv, const lv_area_t* area,
             uint8_t r = ((c >> 11) & 0x1F) << 3;
             uint8_t g = ((c >> 5)  & 0x3F) << 2;
             uint8_t b = ((c >> 0)  & 0x1F) << 3;
-            // Full opacity for all UI pixels (non-black)
-            // Transparent for black (camera shows through)
-            uint8_t a = (r == 0 && g == 0 && b == 0) ? 0 : 255;
-            dst[x] = (a << 24) | (r << 16) | (g << 8) | b;
+
+            // Determine alpha from the screen background opacity:
+            // If this pixel matches the screen bg color, use the screen's
+            // bg_opa as its alpha (transparent bg -> camera shows through).
+            // Otherwise the pixel belongs to an actual UI widget and gets
+            // full opacity, so black text/icons remain visible.
+            uint8_t a = (c == bg_raw) ? scr_bg_opa : 255;
+            dst[x] = (static_cast<uint32_t>(a) << 24) | (r << 16) | (g << 8) | b;
         }
     }
 

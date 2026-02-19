@@ -1,20 +1,20 @@
 cmake_minimum_required(VERSION 3.16)
-project(cinepi_app VERSION 1.0.0 LANGUAGES C CXX)
+project(cinepi_app VERSION 1.2.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
-# Raspberry Pi cross-compile friendly
+# Build type
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
-set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG")
+set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG -flto")
 set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -DDEBUG")
 
-# ─── Find system packages ───────────────────────────────────────────
+# ─── Dependencies ───────────────────────────────────────────────────
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(DRM REQUIRED libdrm)
 pkg_check_modules(GBM REQUIRED gbm)
@@ -24,33 +24,27 @@ pkg_check_modules(GPIOD REQUIRED libgpiod)
 find_library(TURBOJPEG_LIB turbojpeg REQUIRED)
 find_library(I2C_LIB i2c)
 
-# nlohmann/json - header only
 find_path(NLOHMANN_JSON_INCLUDE nlohmann/json.hpp
     PATHS /usr/include /usr/local/include
 )
 
-# ─── LVGL (built from source) ───────────────────────────────────────
+# ─── LVGL ───────────────────────────────────────────────────────────
 set(LVGL_DIR ${CMAKE_SOURCE_DIR}/lvgl)
 if(NOT EXISTS ${LVGL_DIR}/lvgl.h)
-    message(FATAL_ERROR "LVGL not found at ${LVGL_DIR}. Run: git clone -b release/v8.3 https://github.com/lvgl/lvgl.git")
+    message(FATAL_ERROR "LVGL not found at ${LVGL_DIR}")
 endif()
 
-# LVGL config header location
 set(LV_CONF_PATH ${CMAKE_SOURCE_DIR}/include/core/lv_conf.h)
 add_definitions(-DLV_CONF_INCLUDE_SIMPLE)
 
-# Collect all LVGL sources
-file(GLOB_RECURSE LVGL_SOURCES
-    ${LVGL_DIR}/src/*.c
-)
-
+file(GLOB_RECURSE LVGL_SOURCES ${LVGL_DIR}/src/*.c)
 add_library(lvgl STATIC ${LVGL_SOURCES})
 target_include_directories(lvgl PUBLIC
-    ${CMAKE_SOURCE_DIR}/include/core  # lv_conf.h lives here
-    ${CMAKE_SOURCE_DIR}               # so #include "lvgl/lvgl.h" works
+    ${CMAKE_SOURCE_DIR}/include/core
+    ${CMAKE_SOURCE_DIR}
 )
 
-# ─── SquareLine Studio UI sources ───────────────────────────────────
+# ─── SquareLine UI ───────────────────────────────────────────────────
 file(GLOB UI_SOURCES
     ${CMAKE_SOURCE_DIR}/UI/ui.c
     ${CMAKE_SOURCE_DIR}/UI/ui_helpers.c
@@ -68,10 +62,11 @@ target_include_directories(ui_squareline PUBLIC
 )
 target_link_libraries(ui_squareline PUBLIC lvgl)
 
-# ─── Application sources ────────────────────────────────────────────
+# ─── Application Sources ────────────────────────────────────────────
 set(APP_SOURCES
     src/main.cpp
     src/core/config.cpp
+    src/core/hardware_health.cpp
     src/drivers/drm_display.cpp
     src/drivers/touch_input.cpp
     src/drivers/gpio_driver.cpp
@@ -124,7 +119,7 @@ target_link_directories(cinepi_app PRIVATE
     ${GPIOD_LIBRARY_DIRS}
 )
 
-# ─── Install ────────────────────────────────────────────────────────
+# ─── Installation ───────────────────────────────────────────────────
 install(TARGETS cinepi_app DESTINATION /home/pi/cinepi_app/build)
 install(FILES assets/boot_logo.png DESTINATION /home/pi/cinepi_app/assets)
 install(FILES assets/Inter_regular.ttf assets/inter_bold.ttf

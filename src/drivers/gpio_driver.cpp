@@ -141,6 +141,8 @@ void GpioDriver::deinit() {
 }
 
 void GpioDriver::on_shutter(ButtonCallback cb) {
+    // IMPORTANT: Must be called BEFORE init() or while poll thread is not running
+    // to avoid data race on std::function
     shutter_cb_ = std::move(cb);
 }
 
@@ -159,12 +161,15 @@ void GpioDriver::set_flash(bool on) {
 }
 
 void GpioDriver::vibrate(int duration_ms) {
-    if (!vibrate_line_) return;
+    if (!vibrate_line_ || !running_) return;
     gpiod_line_set_value(vibrate_line_, 1);
-    std::thread([this, duration_ms]() {
-        usleep(duration_ms * 1000);
+    // Use a blocking sleep in-place instead of a detached thread
+    // to avoid use-after-free if deinit() is called while sleeping.
+    // Vibrate durations are short (30-50ms), so blocking is acceptable.
+    usleep(duration_ms * 1000);
+    if (vibrate_line_ && running_) {
         gpiod_line_set_value(vibrate_line_, 0);
-    }).detach();
+    }
 }
 
 uint64_t GpioDriver::last_activity_ms() const {

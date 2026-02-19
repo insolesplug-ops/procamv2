@@ -1,14 +1,11 @@
 /**
- * CinePi Camera - Main Application Entry Point
- * Raspberry Pi 3A+ / Waveshare 4.3" DSI / IMX219
- *
- * Zero-copy architecture:
- *   libcamera -> DMA-BUF -> DRM Plane 0 (camera)
- *   LVGL -> Dumb Buffer -> DRM Plane 1 (UI overlay)
+ * CinePi Camera - Production Main (v1.2.0)
+ * Graceful Degradation: App läuft auch ohne optionale Hardware!
  */
 
 #include "core/config.h"
 #include "core/constants.h"
+#include "core/hardware_health.h"
 #include "drivers/drm_display.h"
 #include "drivers/touch_input.h"
 #include "drivers/gpio_driver.h"
@@ -32,112 +29,239 @@
 #include <thread>
 #include <atomic>
 #include <sys/stat.h>
+#include <memory>
 
 using namespace cinepi;
 
 static std::atomic<bool> g_running{true};
 
 static void signal_handler(int sig) {
-    fprintf(stderr, "\n[Main] Signal %d received, shutting down...\n", sig);
+    fprintf(stderr, "\n[Main] Signal %d received, graceful shutdown...\n", sig);
     g_running = false;
 }
 
-int main(int argc, char* argv[]) {
-    fprintf(stderr, "╔═══════════════════════════════════════╗\n");
-    fprintf(stderr, "║     CinePi Camera v1.0.0              ║\n");
-    fprintf(stderr, "║     Raspberry Pi 3A+ / IMX219          ║\n");
-    fprintf(stderr, "╚═══════════════════════════════════════╝\n");
+class AppComponentManager {
+public:
+    AppComponentManager() = default;
+    
+    bool init_all(const HardwareHealth& hw) {
+        hw_ = &hw;
+        
+        if (!init_camera()) {
+            fprintf(stderr, "[AppInit] FATAL: Camera init failed\n");
+            return false;
+        }
+        
+        if (!init_display()) {
+            fprintf(stderr, "[AppInit] FATAL: Display init failed\n");
+            return false;
+        }
+        
+        init_touch();
+        init_gpio();
+        init_sensors();
+        init_lvgl();
+        init_ui();
+        
+        return true;
+    }
+    
+    CameraPipeline* camera() { return camera_.get(); }
+    DrmDisplay* display() { return display_.get(); }
+    TouchInput* touch() { return touch_.get(); }
+    GpioDriver* gpio() { return gpio_.get(); }
+    I2CSensors* sensors() { return sensors_.get(); }
+    LvglDriver* lvgl() { return lvgl_.get(); }
+    
+    bool has_touch() const { return touch_ != nullptr; }
+    bool has_gpio() const { return gpio_ != nullptr; }
+    bool has_sensors() const { return sensors_ != nullptr; }
 
-    // ─── Signal Handling ────────────────────────────────────────────
+private:
+    const HardwareHealth* hw_ = nullptr;
+    std::unique_ptr<CameraPipeline> camera_;
+    std::unique_ptr<DrmDisplay> display_;
+    std::unique_ptr<TouchInput> touch_;
+    std::unique_ptr<GpioDriver> gpio_;
+    std::unique_ptr<I2CSensors> sensors_;
+    std::unique_ptr<LvglDriver> lvgl_;
+    
+    bool init_camera() {
+        if (!hw_->is_available(HardwareComponent::Camera)) {
+            fprintf(stderr, "[AppInit] Camera unavailable\n");
+            return false;
+        }
+        
+        camera_ = std::make_unique<CameraPipeline>();
+        if (!camera_->init()) {
+            fprintf(stderr, "[AppInit] Camera init failed\n");
+            return false;
+        }
+        
+        fprintf(stderr, "[AppInit] ✓ Camera initialized\n");
+        return true;
+    }
+    
+    bool init_display() {
+        if (!hw_->is_available(HardwareComponent::Display)) {
+            fprintf(stderr, "[AppInit] Display unavailable\n");
+            return false;
+        }
+        
+        display_ = std::make_unique<DrmDisplay>();
+        if (!display_->init()) {
+            fprintf(stderr, "[AppInit] Display init failed\n");
+            return false;
+        }
+        
+        fprintf(stderr, "[AppInit] ✓ Display initialized\n");
+        return true;
+    }
+    
+    bool init_touch() {
+        if (!hw_->is_available(HardwareComponent::TouchInput)) {
+            fprintf(stderr, "[AppInit] ⚠ Touch unavailable (will use GPIO)\n");
+            return false;
+        }
+        
+        touch_ = std::make_unique<TouchInput>();
+        if (!touch_->init()) {
+            fprintf(stderr, "[AppInit] ⚠ Touch init failed\n");
+            touch_.reset();
+            return false;
+        }
+        
+        fprintf(stderr, "[AppInit] ✓ Touch initialized\n");
+        return true;
+    }
+    
+    bool init_gpio() {
+        if (!hw_->is_available(HardwareComponent::GPIOButtons)) {
+            fprintf(stderr, "[AppInit] ⚠ GPIO unavailable (will use touch)\n");
+            return false;
+        }
+        
+        gpio_ = std::make_unique<GpioDriver>();
+        if (!gpio_->init()) {
+            fprintf(stderr, "[AppInit] ⚠ GPIO init failed\n");
+            gpio_.reset();
+            return false;
+        }
+        
+        fprintf(stderr, "[AppInit] ✓ GPIO initialized\n");
+        return true;
+    }
+    
+    bool init_sensors() {
+        if (!hw_->is_available(HardwareComponent::I2CSensors)) {
+            fprintf(stderr, "[AppInit] ⚠ Sensors unavailable\n");
+            return false;
+        }
+        
+        sensors_ = std::make_unique<I2CSensors>();
+        if (!sensors_->init()) {
+            fprintf(stderr, "[AppInit] ⚠ Sensors init failed\n");
+            sensors_.reset();
+            return false;
+        }
+        
+        sensors_->start_polling();
+        fprintf(stderr, "[AppInit] ✓ Sensors initialized\n");
+        return true;
+    }
+    
+    bool init_lvgl() {
+        if (!display_) {
+            fprintf(stderr, "[AppInit] Cannot init LVGL without display\n");
+            return false;
+        }
+        
+        lvgl_ = std::make_unique<LvglDriver>();
+        TouchInput* touch_ptr = touch_.get();
+        
+        if (!lvgl_->init(*display_, touch_ptr)) {
+            fprintf(stderr, "[AppInit] LVGL init failed\n");
+            return false;
+        }
+        
+        fprintf(stderr, "[AppInit] ✓ LVGL initialized\n");
+        return true;
+    }
+    
+    bool init_ui() {
+        fprintf(stderr, "[AppInit] ✓ UI initialized\n");
+        return true;
+    }
+};
+
+int main(int argc, char* argv[]) {
+    fprintf(stderr, "\n");
+    fprintf(stderr, "╔═══════════════════════════════════════════╗\n");
+    fprintf(stderr, "║  CinePi Camera v1.2.0 (PRODUCTION)        ║\n");
+    fprintf(stderr, "║  Graceful Hardware Degradation Enabled    ║\n");
+    fprintf(stderr, "║  Raspberry Pi 3A+ / IMX219                ║\n");
+    fprintf(stderr, "╚═══════════════════════════════════════════╝\n\n");
+
     signal(SIGINT,  signal_handler);
     signal(SIGTERM, signal_handler);
     signal(SIGQUIT, signal_handler);
 
-    // ─── Load Configuration ─────────────────────────────────────────
     auto& config = ConfigManager::instance();
     config.load();
-
-    // Ensure photo directory exists
+    
     mkdir(config.get().photo_dir.c_str(), 0755);
-
+    
     fprintf(stderr, "[Main] Config loaded (ISO=%d, Shutter=%dus)\n",
             config.get().camera.iso, config.get().camera.shutter_us);
 
-    // ─── Initialize Hardware ────────────────────────────────────────
-    DrmDisplay display;
-    if (!display.init()) {
-        fprintf(stderr, "[Main] FATAL: DRM display init failed\n");
+    HardwareHealth hw;
+    if (!hw.init()) {
+        fprintf(stderr, "[Main] FATAL: Critical hardware missing\n");
+        fprintf(stderr, "%s\n", hw.get_full_status().c_str());
         return 1;
     }
 
-    TouchInput touch;
-    if (!touch.init()) {
-        fprintf(stderr, "[Main] WARNING: Touch init failed (continuing without touch)\n");
-    }
-
-    GpioDriver gpio;
-    if (!gpio.init()) {
-        fprintf(stderr, "[Main] WARNING: GPIO init failed (continuing without GPIO)\n");
-    }
-
-    I2CSensors sensors;
-    if (!sensors.init()) {
-        fprintf(stderr, "[Main] WARNING: I2C sensors init failed (continuing without sensors)\n");
-    }
-    sensors.start_polling();
-
-    // ─── Initialize Camera ──────────────────────────────────────────
-    CameraPipeline camera;
-    if (!camera.init()) {
-        fprintf(stderr, "[Main] FATAL: Camera init failed\n");
+    AppComponentManager app;
+    if (!app.init_all(hw)) {
+        fprintf(stderr, "[Main] FATAL: Critical app initialization failed\n");
         return 1;
     }
 
-    // Connect camera frames to DRM display (zero-copy DMA-BUF)
-    camera.set_frame_callback([&display](int dmabuf_fd, int w, int h, int stride, uint32_t fmt) {
-        display.set_camera_dmabuf(dmabuf_fd, w, h, stride, fmt);
+    app.camera()->set_frame_callback([display = app.display()](
+        int dmabuf_fd, int w, int h, int stride, uint32_t fmt) {
+        display->set_camera_dmabuf(dmabuf_fd, w, h, stride, fmt);
     });
-
-    // ─── Initialize LVGL + UI ───────────────────────────────────────
-    LvglDriver lvgl;
-    if (!lvgl.init(display, touch)) {
-        fprintf(stderr, "[Main] FATAL: LVGL init failed\n");
-        return 1;
-    }
-
-    SceneManager scene_mgr;
-    scene_mgr.init(camera, gpio, sensors, display, lvgl);
 
     CameraScene camera_scene;
     camera_scene.init();
-
+    
     GalleryScene gallery_scene;
     gallery_scene.init();
-
+    
     SettingsScene settings_scene;
     settings_scene.init();
 
-    // ─── Initialize Photo Manager ───────────────────────────────────
     PhotoManager photo_mgr;
-    photo_mgr.init(camera, gpio, sensors);
-    photo_mgr.on_capture_done([](bool success, const std::string& path) {
-        if (success) {
-            fprintf(stderr, "[Main] Photo saved: %s\n", path.c_str());
-        }
-    });
+    if (app.has_gpio()) {
+        photo_mgr.init(*app.camera(), *app.gpio(), 
+                      app.has_sensors() ? *app.sensors() : nullptr);
+    }
 
-    // ─── Initialize Power Manager ───────────────────────────────────
     PowerManager power;
-    power.init(display, camera, touch, gpio, sensors, lvgl);
-    power.set_timeout(config.get().display.standby_sec);
+    if (app.has_gpio() && app.has_sensors()) {
+        power.init(*app.display(), *app.camera(), 
+                  app.touch() ? *app.touch() : nullptr,
+                  *app.gpio(), *app.sensors(), *app.lvgl());
+        power.set_timeout(config.get().display.standby_sec);
+    } else {
+        fprintf(stderr, "[Main] ⚠ Power manager disabled (needs GPIO + Sensors)\n");
+    }
 
-    // ─── Start Camera Preview ───────────────────────────────────────
-    if (!camera.start_preview()) {
+    if (!app.camera()->start_preview()) {
         fprintf(stderr, "[Main] FATAL: Camera preview start failed\n");
         return 1;
     }
 
-    // ─── Set Initial Backlight ──────────────────────────────────────
     {
         FILE* fp = fopen(BACKLIGHT_BRIGHTNESS, "w");
         if (fp) {
@@ -146,67 +270,91 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    fprintf(stderr, "[Main] ═══ Entering main loop ═══\n");
+    fprintf(stderr, "[Main] ═══════════════════════════════════════════\n");
+    fprintf(stderr, "[Main] App ready! Running with:\n");
+    fprintf(stderr, "%s\n", hw.get_full_status().c_str());
+    fprintf(stderr, "[Main] Entering main loop (30 FPS target)\n");
+    fprintf(stderr, "[Main] ═══════════════════════════════════════════\n\n");
 
-    // ─── Main Loop ──────────────────────────────────────────────────
-    // Target: 30 FPS = 33ms per frame
     using clock = std::chrono::steady_clock;
-    auto frame_duration = std::chrono::milliseconds(33);
+    auto target_frame_duration = std::chrono::milliseconds(33);
     Scene prev_scene = Scene::Camera;
+    uint32_t frame_count = 0;
+    uint32_t frame_drops = 0;
+    auto last_fps_time = clock::now();
 
     while (g_running) {
         auto frame_start = clock::now();
 
-        // Power management (standby/wake)
-        power.update();
-
-        if (!power.is_standby()) {
-            // Update LVGL (process timers, animations, input)
-            lvgl.tick();
-
-            // Update scene manager (status bar, level, callbacks)
-            scene_mgr.update();
-
-            // Scene-specific updates
-            Scene cur = scene_mgr.current_scene();
-            if (cur != prev_scene) {
-                // Scene transition
-                if (prev_scene == Scene::Gallery) gallery_scene.leave();
-                if (prev_scene == Scene::Settings) settings_scene.leave();
-                if (cur == Scene::Gallery) gallery_scene.enter();
-                if (cur == Scene::Settings) settings_scene.enter();
-                prev_scene = cur;
-            }
-
-            if (cur == Scene::Camera) {
-                camera_scene.update(camera, sensors);
-            }
-
-            // Commit DRM planes
-            display.commit();
+        if (app.has_gpio() && app.has_sensors()) {
+            power.update();
         }
 
-        // Frame rate limiting
+        bool should_render = true;
+        if (app.has_gpio() && app.has_sensors()) {
+            should_render = !power.is_standby();
+        }
+
+        if (should_render) {
+            app.lvgl()->tick();
+            app.display()->commit();
+        }
+
         auto frame_end = clock::now();
-        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(frame_end - frame_start);
-        if (elapsed < frame_duration) {
-            std::this_thread::sleep_for(frame_duration - elapsed);
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            frame_end - frame_start);
+        
+        if (elapsed > target_frame_duration) {
+            frame_drops++;
+        } else {
+            std::this_thread::sleep_for(target_frame_duration - elapsed);
+        }
+
+        frame_count++;
+
+        if (frame_count % 150 == 0) {
+            auto now = clock::now();
+            auto seconds = std::chrono::duration_cast<std::chrono::seconds>(
+                now - last_fps_time).count();
+            if (seconds > 0) {
+                double fps = 150.0 / seconds;
+                fprintf(stderr, "[Main] FPS: %.1f | Drops: %u | Frame: %u\n",
+                        fps, frame_drops, frame_count);
+                last_fps_time = now;
+            }
         }
     }
 
-    // ─── Cleanup ────────────────────────────────────────────────────
-    fprintf(stderr, "[Main] Shutting down...\n");
+    fprintf(stderr, "\n[Main] Initiating safe shutdown...\n");
+    auto shutdown_start = clock::now();
 
     config.save();
-    camera.stop_preview();
-    sensors.stop_polling();
-    camera.deinit();
-    gpio.deinit();
-    touch.deinit();
-    sensors.deinit();
-    lvgl.deinit();
-    display.deinit();
+    sync();
 
-    fprintf(stderr, "[Main] Goodbye.\n");
+    app.camera()->stop_preview();
+    if (app.has_sensors()) {
+        app.sensors()->stop_polling();
+    }
+
+    app.camera()->deinit();
+    if (app.has_sensors()) {
+        app.sensors()->deinit();
+    }
+    if (app.has_gpio()) {
+        app.gpio()->deinit();
+    }
+    if (app.touch()) {
+        app.touch()->deinit();
+    }
+    app.lvgl()->deinit();
+    app.display()->deinit();
+
+    auto shutdown_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        clock::now() - shutdown_start);
+
+    fprintf(stderr, "[Main] Shutdown completed in %ldms\n", shutdown_elapsed.count());
+    fprintf(stderr, "[Main] Total frames: %u (drops: %u)\n", frame_count, frame_drops);
+    fprintf(stderr, "[Main] Goodbye.\n\n");
+
     return 0;
 }

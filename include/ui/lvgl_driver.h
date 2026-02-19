@@ -6,6 +6,13 @@
 
 #include <cstdint>
 
+// Forward-declare LVGL opaque types to avoid including lvgl.h in header
+struct _lv_disp_drv_t;
+struct _lv_area_t;
+struct _lv_color_t;
+struct _lv_indev_drv_t;
+struct _lv_indev_data_t;
+
 namespace cinepi {
 
 class DrmDisplay;
@@ -16,7 +23,7 @@ public:
     LvglDriver();
     ~LvglDriver();
 
-    bool init(DrmDisplay& display, TouchInput& touch);
+    bool init(DrmDisplay& display, TouchInput* touch);
     void deinit();
 
     // Call in main loop
@@ -29,8 +36,9 @@ public:
     bool is_paused() const { return paused_; }
 
 private:
+    // Callbacks implemented in .cpp with proper LVGL types via casts
     static void flush_cb(struct _lv_disp_drv_t* drv, const struct _lv_area_t* area,
-                          uint16_t* color_p);  // actually lv_color_t*
+                          struct _lv_color_t* color_p);
     static void input_read_cb(struct _lv_indev_drv_t* drv, struct _lv_indev_data_t* data);
 
     DrmDisplay* display_ = nullptr;
@@ -38,9 +46,9 @@ private:
     bool paused_ = false;
     bool initialized_ = false;
 
-    // LVGL draw buffers
-    uint16_t* buf1_ = nullptr;
-    uint16_t* buf2_ = nullptr;
+    // LVGL draw buffers (allocated as lv_color_t in .cpp)
+    void* buf1_ = nullptr;
+    void* buf2_ = nullptr;
 };
 
 } // namespace cinepi

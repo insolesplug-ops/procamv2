@@ -12,13 +12,13 @@
 /* ─── Color ──────────────────────────────────────────────────────── */
 #define LV_COLOR_DEPTH     16
 #define LV_COLOR_16_SWAP   0
-#define LV_COLOR_SCREEN_TRANSP 1
+#define LV_COLOR_SCREEN_TRANSP 0   /* Requires 32-bit; we use 16-bit with DRM overlay for transparency */
 #define LV_COLOR_MIX_ROUND_OFS 128
 #define LV_COLOR_CHROMA_KEY lv_color_hex(0x00ff00)
 
 /* ─── Memory ─────────────────────────────────────────────────────── */
 #define LV_MEM_CUSTOM      0
-#define LV_MEM_SIZE        (256U * 1024U)  /* 256KB for LVGL heap */
+#define LV_MEM_SIZE        (512U * 1024U)  /* 512KB for LVGL heap - settings/gallery need headroom */
 #define LV_MEM_ADR         0
 #define LV_MEM_BUF_MAX_NUM 16
 #define LV_MEMCPY_MEMSET_STD 1
@@ -73,7 +73,7 @@ extern uint32_t cinepi_lv_tick_get(void);
 #define LV_USE_ASSERT_MEM_INTEGRITY 0
 #define LV_USE_ASSERT_OBJ           0
 #define LV_ASSERT_HANDLER_INCLUDE   <stdint.h>
-#define LV_ASSERT_HANDLER while(1);
+#define LV_ASSERT_HANDLER do { fprintf(stderr, "LVGL ASSERT FAILED\n"); } while(0);
 
 /* ─── Others ─────────────────────────────────────────────────────── */
 #define LV_USE_PERF_MONITOR    0

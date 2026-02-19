@@ -24,6 +24,10 @@
 
 namespace cinepi {
 
+// Track the GEM handle imported from DMA-BUF separately from dumb buffer handles.
+// This is file-scoped because the header does not expose it.
+static uint32_t s_camera_imported_gem_handle = 0;
+
 DrmDisplay::DrmDisplay() = default;
 
 DrmDisplay::~DrmDisplay() {
@@ -72,6 +76,15 @@ void DrmDisplay::deinit() {
     if (drm_fd_ < 0) return;
 
     destroy_dumb_buffer(ui_plane_);
+    destroy_dumb_buffer(camera_plane_);
+
+    // Close any imported GEM handle from DMA-BUF
+    if (s_camera_imported_gem_handle) {
+        struct drm_gem_close gem_close = {};
+        gem_close.handle = s_camera_imported_gem_handle;
+        drmIoctl(drm_fd_, DRM_IOCTL_GEM_CLOSE, &gem_close);
+        s_camera_imported_gem_handle = 0;
+    }
 
     if (camera_fb_id_) {
         drmModeRmFB(drm_fd_, camera_fb_id_);
@@ -295,12 +308,31 @@ bool DrmDisplay::set_camera_dmabuf(int dmabuf_fd, int width, int height,
         camera_fb_id_ = 0;
     }
 
+    // Close the previously imported GEM handle to prevent handle leak.
+    // Each drmPrimeFDToHandle call creates a new GEM handle that must be
+    // explicitly closed when no longer needed.
+    if (s_camera_imported_gem_handle) {
+        struct drm_gem_close gem_close = {};
+        gem_close.handle = s_camera_imported_gem_handle;
+        drmIoctl(drm_fd_, DRM_IOCTL_GEM_CLOSE, &gem_close);
+        s_camera_imported_gem_handle = 0;
+    }
+
+    // On the first call, the initial dumb buffer (black screen) is still alive
+    // in camera_plane_. Destroy it now since we are switching to imported DMA-BUFs.
+    if (camera_plane_.gem_handle) {
+        destroy_dumb_buffer(camera_plane_);
+    }
+
     // Import DMA-BUF as a GEM handle
     uint32_t gem_handle = 0;
     if (drmPrimeFDToHandle(drm_fd_, dmabuf_fd, &gem_handle) != 0) {
         fprintf(stderr, "[DRM] drmPrimeFDToHandle failed: %s\n", strerror(errno));
         return false;
     }
+
+    // Track the imported handle so we can close it on the next frame or at deinit
+    s_camera_imported_gem_handle = gem_handle;
 
     // Create framebuffer from GEM handle
     uint32_t handles[4] = {gem_handle, 0, 0, 0};
@@ -311,6 +343,11 @@ bool DrmDisplay::set_camera_dmabuf(int dmabuf_fd, int width, int height,
                        handles, strides, offsets,
                        &camera_fb_id_, 0) != 0) {
         fprintf(stderr, "[DRM] drmModeAddFB2 failed: %s\n", strerror(errno));
+        // Clean up the imported handle on failure
+        struct drm_gem_close gem_close = {};
+        gem_close.handle = gem_handle;
+        drmIoctl(drm_fd_, DRM_IOCTL_GEM_CLOSE, &gem_close);
+        s_camera_imported_gem_handle = 0;
         return false;
     }
 
