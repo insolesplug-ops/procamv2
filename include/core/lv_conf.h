@@ -8,6 +8,7 @@
 #define LV_CONF_H
 
 #include <stdint.h>
+#include <stdio.h>
 
 /* ─── Color ──────────────────────────────────────────────────────── */
 #define LV_COLOR_DEPTH     16
