@@ -424,7 +424,7 @@ uint32_t DrmDisplay::find_plane_type(uint32_t wanted_type)
 // After the first CAMERA_BUF_COUNT frames every call is a cache hit → no
 // per-frame kernel ioctl overhead.
 
-DrmDisplay::CamFbEntry *
+CamFbEntry *
 DrmDisplay::get_or_import(int fd, int w, int h, int stride, uint32_t fourcc)
 {
     // Cache lookup
