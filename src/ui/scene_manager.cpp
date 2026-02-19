@@ -73,6 +73,10 @@ void SceneManager::update_status_bar() {
     // Time
     time_t now = time(nullptr);
     struct tm* t = localtime(&now);
+    if (!t) {
+        lv_label_set_text(ui_time_label, "--:--");
+        return;
+    }
 
     // Free space
     struct statvfs stat;

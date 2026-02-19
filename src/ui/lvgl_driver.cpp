@@ -49,7 +49,9 @@ bool LvglDriver::init(DrmDisplay& display, TouchInput* touch) {
     buf1_ = static_cast<void*>(malloc(buf_size * sizeof(lv_color_t)));
     buf2_ = static_cast<void*>(malloc(buf_size * sizeof(lv_color_t)));
     if (!buf1_ || !buf2_) {
-        fprintf(stderr, "[LVGL] Buffer allocation failed\n");
+        fprintf(stderr, "[LVGL] Buffer allocation failed (requested %u bytes)\n", buf_size * (uint32_t)sizeof(lv_color_t));
+        if (buf1_) { free(buf1_); buf1_ = nullptr; }
+        if (buf2_) { free(buf2_); buf2_ = nullptr; }
         return false;
     }
 

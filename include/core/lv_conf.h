@@ -19,7 +19,7 @@
 
 /* ─── Memory ─────────────────────────────────────────────────────── */
 #define LV_MEM_CUSTOM      0
-#define LV_MEM_SIZE        (512U * 1024U)  /* 512KB for LVGL heap - settings/gallery need headroom */
+#define LV_MEM_SIZE        (384U * 1024U)  /* 384KB for LVGL heap - optimized for Pi 3A+ (512MB total) */
 #define LV_MEM_ADR         0
 #define LV_MEM_BUF_MAX_NUM 16
 #define LV_MEMCPY_MEMSET_STD 1

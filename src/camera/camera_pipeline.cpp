@@ -125,10 +125,18 @@ bool CameraPipeline::start_preview() {
     const auto& buffers = allocator_->buffers(preview_stream_);
     for (auto& buf : buffers) {
         std::unique_ptr<Request> request = camera_->createRequest();
-        if (!request) continue;
+        if (!request) {
+            fprintf(stderr, "[Camera] Failed to create request\n");
+            continue;
+        }
         request->addBuffer(preview_stream_, buf.get());
         configure_controls();
-        camera_->queueRequest(request.release());
+        int ret = camera_->queueRequest(request.get());
+        if (ret != 0) {
+            fprintf(stderr, "[Camera] Failed to queue request: %d\n", ret);
+            return false;
+        }
+        request.release();
     }
 
     running_ = true;

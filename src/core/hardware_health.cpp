@@ -59,23 +59,30 @@ bool HardwareHealth::check_camera() {
     try {
         using namespace libcamera;
         auto cm = std::make_unique<CameraManager>();
-        if (cm->start() != 0) {
+        if (!cm || cm->start() != 0) {
+            fprintf(stderr, "[Hardware] CameraManager start failed\n");
             status_[HardwareComponent::Camera] = HardwareStatus::Failed;
             return false;
         }
         
         auto cameras = cm->cameras();
         if (cameras.empty()) {
+            fprintf(stderr, "[Hardware] No cameras detected\n");
             status_[HardwareComponent::Camera] = HardwareStatus::Failed;
             cm->stop();
             return false;
         }
         
+        fprintf(stderr, "[Hardware] Camera found: %s\n", cameras[0]->id().c_str());
         status_[HardwareComponent::Camera] = HardwareStatus::OK;
         cm->stop();
         return true;
     } catch (const std::exception& e) {
-        fprintf(stderr, "[Hardware] Camera exception: %s\n", e.what());
+        fprintf(stderr, "[Hardware] CRITICAL: Camera exception: %s\n", e.what());
+        status_[HardwareComponent::Camera] = HardwareStatus::Failed;
+        return false;
+    } catch (...) {
+        fprintf(stderr, "[Hardware] CRITICAL: Unknown camera exception\n");
         status_[HardwareComponent::Camera] = HardwareStatus::Failed;
         return false;
     }

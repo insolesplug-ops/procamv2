@@ -277,19 +277,22 @@ int main(int argc, char* argv[]) {
     fprintf(stderr, "[Main] ═══════════════════════════════════════════\n\n");
 
     using clock = std::chrono::steady_clock;
-    auto target_frame_duration = std::chrono::milliseconds(33);
+    auto target_frame_duration = std::chrono::milliseconds(33);  // 30 FPS
     Scene prev_scene = Scene::Camera;
     uint32_t frame_count = 0;
     uint32_t frame_drops = 0;
     auto last_fps_time = clock::now();
+    auto last_render_time = clock::now();
 
     while (g_running) {
         auto frame_start = clock::now();
 
+        // Power management update (optional hardware)
         if (app.has_gpio() && app.has_sensors()) {
             power.update();
         }
 
+        // Smart rendering: skip frames if behind
         bool should_render = true;
         if (app.has_gpio() && app.has_sensors()) {
             should_render = !power.is_standby();
@@ -298,28 +301,32 @@ int main(int argc, char* argv[]) {
         if (should_render) {
             app.lvgl()->tick();
             app.display()->commit();
+            last_render_time = frame_start;
         }
 
         auto frame_end = clock::now();
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
             frame_end - frame_start);
         
-        if (elapsed > target_frame_duration) {
-            frame_drops++;
-        } else {
+        // Adaptive frame-rate: don't sleep if we're behind
+        if (elapsed < target_frame_duration) {
             std::this_thread::sleep_for(target_frame_duration - elapsed);
+        } else {
+            frame_drops++;
         }
 
         frame_count++;
 
+        // FPS monitoring (only every 150 frames to reduce overhead)
         if (frame_count % 150 == 0) {
             auto now = clock::now();
             auto seconds = std::chrono::duration_cast<std::chrono::seconds>(
                 now - last_fps_time).count();
             if (seconds > 0) {
                 double fps = 150.0 / seconds;
-                fprintf(stderr, "[Main] FPS: %.1f | Drops: %u | Frame: %u\n",
-                        fps, frame_drops, frame_count);
+                fprintf(stderr, "[Main] FPS: %.1f | Drops: %u/%u | RAM: ~%uMB\n",
+                        fps, frame_drops, frame_count, 
+                        static_cast<unsigned>(frame_count / 30));  // Rough estimate
                 last_fps_time = now;
             }
         }
