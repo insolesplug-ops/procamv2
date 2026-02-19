@@ -147,12 +147,10 @@ void LvglDriver::flush_cb(void* drv_void, const void* area_void, void* color_p_v
             uint8_t g = ((c >> 5)  & 0x3F) << 2;
             uint8_t b = ((c >> 0)  & 0x1F) << 3;
 
-            // Determine alpha from the screen background opacity:
-            // If this pixel matches the screen bg color, use the screen's
-            // bg_opa as its alpha (transparent bg -> camera shows through).
-            // Otherwise the pixel belongs to an actual UI widget and gets
-            // full opacity, so black text/icons remain visible.
-            uint8_t a = (c == bg_raw) ? scr_bg_opa : 255;
+            // Force true transparency for background pixels and full opacity
+            // for real UI content. Using style bg_opa here caused a milky
+            // fullscreen overlay on some displays.
+            uint8_t a = (c == bg_raw) ? 0 : 255;
             dst[x] = (static_cast<uint32_t>(a) << 24) | (r << 16) | (g << 8) | b;
         }
     }
