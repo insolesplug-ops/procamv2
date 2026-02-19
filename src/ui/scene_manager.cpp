@@ -74,7 +74,7 @@ void SceneManager::update_status_bar() {
     time_t now = time(nullptr);
     struct tm* t = localtime(&now);
     if (!t) {
-        lv_label_set_text(ui_time_label, "--:--");
+        // Time not available - skip update
         return;
     }
 
