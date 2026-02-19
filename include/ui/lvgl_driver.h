@@ -36,10 +36,9 @@ public:
     bool is_paused() const { return paused_; }
 
 private:
-    // Callbacks implemented in .cpp with proper LVGL types via casts
-    static void flush_cb(struct _lv_disp_drv_t* drv, const struct _lv_area_t* area,
-                          struct _lv_color_t* color_p);
-    static void input_read_cb(struct _lv_indev_drv_t* drv, struct _lv_indev_data_t* data);
+    // Callbacks use void* to avoid type conflicts with LVGL internal types
+    static void flush_cb(void* drv, const void* area, void* color_p);
+    static void input_read_cb(void* drv, void* data);
 
     DrmDisplay* display_ = nullptr;
     TouchInput* touch_ = nullptr;
