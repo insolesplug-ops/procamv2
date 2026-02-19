@@ -336,6 +336,14 @@ bool DrmDisplay::set_camera_dmabuf(int dmabuf_fd, int width, int height,
     // Track the imported handle so we can close it on the next frame or at deinit
     s_camera_imported_gem_handle = gem_handle;
 
+    // DEBUG: Log first camera frame
+    static bool first_frame = true;
+    if (first_frame) {
+        fprintf(stderr, "[DRM] First camera frame: %dx%d stride=%d fmt=0x%x fd=%d\n",
+                width, height, stride, format, dmabuf_fd);
+        first_frame = false;
+    }
+
     // Create framebuffer from GEM handle
     uint32_t handles[4] = {gem_handle, 0, 0, 0};
     uint32_t strides[4] = {static_cast<uint32_t>(stride), 0, 0, 0};
@@ -356,12 +364,16 @@ bool DrmDisplay::set_camera_dmabuf(int dmabuf_fd, int width, int height,
     // Set on primary plane - use physical display dimensions
     uint32_t primary_plane_id = find_plane_for_layer(0);
     if (primary_plane_id) {
-        drmModeSetPlane(drm_fd_, primary_plane_id, crtc_id_,
+        int ret = drmModeSetPlane(drm_fd_, primary_plane_id, crtc_id_,
                         camera_fb_id_, 0,
                         0, 0, DISPLAY_PHYS_W, DISPLAY_PHYS_H,   // physical screen
                         0, 0, width << 16, height << 16);
+        if (ret != 0) {
+            fprintf(stderr, "[DRM] drmModeSetPlane for camera failed: %s\n", strerror(errno));
+        }
     } else {
         // Fallback: set on CRTC directly
+        fprintf(stderr, "[DRM] No primary plane found, using CRTC fallback\n");
         drmModeSetCrtc(drm_fd_, crtc_id_, camera_fb_id_, 0, 0,
                         &connector_id_, 1, nullptr);
     }
@@ -372,13 +384,23 @@ bool DrmDisplay::set_camera_dmabuf(int dmabuf_fd, int width, int height,
 bool DrmDisplay::commit() {
     if (drm_fd_ < 0) return false;
 
+    // DEBUG: Log first commit
+    static bool first_commit = true;
+    if (first_commit) {
+        fprintf(stderr, "[DRM] First commit() - ui_plane_.id=%u\n", ui_plane_.id);
+        first_commit = false;
+    }
+
     // For legacy mode, the planes are already set.
     // If overlay plane exists, update it with current UI buffer.
     if (ui_plane_.id) {
-        drmModeSetPlane(drm_fd_, ui_plane_.id, crtc_id_,
+        int ret = drmModeSetPlane(drm_fd_, ui_plane_.id, crtc_id_,
                         ui_plane_.fb_id, 0,
                         0, 0, DISPLAY_PHYS_W, DISPLAY_PHYS_H,   // physical screen
                         0, 0, DISPLAY_W << 16, DISPLAY_H << 16);
+        if (ret != 0) {
+            fprintf(stderr, "[DRM] drmModeSetPlane failed in commit(): %s\n", strerror(errno));
+        }
     }
 
     // Page flip would be better but works for our refresh rate
