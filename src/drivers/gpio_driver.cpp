@@ -1,7 +1,12 @@
 /**
- * CinePi Camera - GPIO Driver (libgpiod)
+ * CinePi Camera - GPIO Driver (libgpiod v2.x)
  * Shutter button (GPIO26), Rotary Encoder (GPIO5/6/13),
  * LED Flash (GPIO27), Vibration Motor (GPIO18)
+ * 
+ * NOTE: Uses libgpiod v2.x API which has significant changes from v1.x:
+ * - Batch request of lines instead of individual line requests
+ * - Different enum names and value representations
+ * - Different function signatures for get/set
  */
 
 #include "drivers/gpio_driver.h"
@@ -28,92 +33,90 @@ GpioDriver::~GpioDriver() {
 }
 
 bool GpioDriver::init() {
+    // Open GPIO chip
     chip_ = gpiod_chip_open(GPIO_CHIP);
     if (!chip_) {
         fprintf(stderr, "[GPIO] Failed to open %s: %s\n", GPIO_CHIP, strerror(errno));
         return false;
     }
 
-    // Shutter button (GPIO26, input, pull-up, active-low)
-    shutter_line_ = gpiod_chip_get_line(chip_, GPIO_SHUTTER_BTN);
-    if (shutter_line_) {
-        struct gpiod_line_request_config cfg = {};
-        cfg.consumer = "cinepi-shutter";
-        cfg.request_type = GPIOD_LINE_REQUEST_DIRECTION_INPUT;
-        cfg.flags = GPIOD_LINE_REQUEST_FLAG_BIAS_PULL_UP;
-        if (gpiod_line_request(shutter_line_, &cfg, 0) != 0) {
-            fprintf(stderr, "[GPIO] Shutter line request failed\n");
-            shutter_line_ = nullptr;
-        }
+    // Define input lines: shutter, encoder CLK, encoder DT, encoder button
+    unsigned int input_offsets[] = {
+        GPIO_SHUTTER_BTN,    // 0
+        GPIO_ENCODER_CLK,    // 1
+        GPIO_ENCODER_DT,     // 2
+        GPIO_ENCODER_BTN     // 3
+    };
+    const unsigned int NUM_INPUTS = 4;
+
+    // Create and configure input request
+    struct gpiod_line_config *input_cfg = gpiod_line_config_new();
+    if (!input_cfg) {
+        fprintf(stderr, "[GPIO] Failed to allocate input config\n");
+        gpiod_chip_close(chip_);
+        chip_ = nullptr;
+        return false;
     }
 
-    // Encoder CLK (GPIO5)
-    enc_clk_line_ = gpiod_chip_get_line(chip_, GPIO_ENCODER_CLK);
-    if (enc_clk_line_) {
-        struct gpiod_line_request_config cfg = {};
-        cfg.consumer = "cinepi-enc-clk";
-        cfg.request_type = GPIOD_LINE_REQUEST_DIRECTION_INPUT;
-        cfg.flags = GPIOD_LINE_REQUEST_FLAG_BIAS_PULL_UP;
-        if (gpiod_line_request(enc_clk_line_, &cfg, 0) != 0) {
-            enc_clk_line_ = nullptr;
-        }
+    // Set direction and flags for all input lines
+    gpiod_line_config_set_direction_input(input_cfg);
+    gpiod_line_config_set_bias(input_cfg, GPIOD_LINE_BIAS_PULL_UP);
+
+    // Request all input lines at once
+    input_req_ = gpiod_chip_request_lines(chip_, nullptr, input_cfg,
+                                          input_offsets, NUM_INPUTS);
+    gpiod_line_config_free(input_cfg);
+
+    if (!input_req_) {
+        fprintf(stderr, "[GPIO] Failed to request input lines: %s\n", strerror(errno));
+        gpiod_chip_close(chip_);
+        chip_ = nullptr;
+        return false;
     }
 
-    // Encoder DT (GPIO6)
-    enc_dt_line_ = gpiod_chip_get_line(chip_, GPIO_ENCODER_DT);
-    if (enc_dt_line_) {
-        struct gpiod_line_request_config cfg = {};
-        cfg.consumer = "cinepi-enc-dt";
-        cfg.request_type = GPIOD_LINE_REQUEST_DIRECTION_INPUT;
-        cfg.flags = GPIOD_LINE_REQUEST_FLAG_BIAS_PULL_UP;
-        if (gpiod_line_request(enc_dt_line_, &cfg, 0) != 0) {
-            enc_dt_line_ = nullptr;
-        }
+    // Define output lines: flash LED, vibration motor
+    unsigned int output_offsets[] = {
+        GPIO_LED_FLASH,      // 0
+        GPIO_VIBRATION       // 1
+    };
+    const unsigned int NUM_OUTPUTS = 2;
+
+    // Create and configure output request
+    struct gpiod_line_config *output_cfg = gpiod_line_config_new();
+    if (!output_cfg) {
+        fprintf(stderr, "[GPIO] Failed to allocate output config\n");
+        gpiod_line_request_release(input_req_);
+        gpiod_chip_close(chip_);
+        chip_ = nullptr;
+        return false;
     }
 
-    // Encoder Button (GPIO13)
-    enc_btn_line_ = gpiod_chip_get_line(chip_, GPIO_ENCODER_BTN);
-    if (enc_btn_line_) {
-        struct gpiod_line_request_config cfg = {};
-        cfg.consumer = "cinepi-enc-btn";
-        cfg.request_type = GPIOD_LINE_REQUEST_DIRECTION_INPUT;
-        cfg.flags = GPIOD_LINE_REQUEST_FLAG_BIAS_PULL_UP;
-        if (gpiod_line_request(enc_btn_line_, &cfg, 0) != 0) {
-            enc_btn_line_ = nullptr;
-        }
+    // Set direction for output lines
+    gpiod_line_config_set_direction_output(output_cfg);
+    gpiod_line_config_set_output_value(output_cfg, GPIOD_LINE_VALUE_INACTIVE);
+
+    // Request all output lines at once
+    output_req_ = gpiod_chip_request_lines(chip_, nullptr, output_cfg,
+                                           output_offsets, NUM_OUTPUTS);
+    gpiod_line_config_free(output_cfg);
+
+    if (!output_req_) {
+        fprintf(stderr, "[GPIO] Failed to request output lines: %s\n", strerror(errno));
+        gpiod_line_request_release(input_req_);
+        gpiod_chip_close(chip_);
+        chip_ = nullptr;
+        return false;
     }
 
-    // Flash LED (GPIO27, output)
-    flash_line_ = gpiod_chip_get_line(chip_, GPIO_LED_FLASH);
-    if (flash_line_) {
-        if (gpiod_line_request_output(flash_line_, "cinepi-flash", 0) != 0) {
-            flash_line_ = nullptr;
-        }
-    }
-
-    // Vibration Motor (GPIO18, output)
-    vibrate_line_ = gpiod_chip_get_line(chip_, GPIO_VIBRATION);
-    if (vibrate_line_) {
-        if (gpiod_line_request_output(vibrate_line_, "cinepi-vib", 0) != 0) {
-            vibrate_line_ = nullptr;
-        }
-    }
-
-    // Read initial encoder state
-    if (enc_clk_line_) {
-        enc_last_clk_ = gpiod_line_get_value(enc_clk_line_);
-    }
+    // Read initial encoder CLK state (input line 1)
+    enum gpiod_line_value clk_val = gpiod_line_request_get_value(input_req_, 1);
+    enc_last_clk_ = (clk_val == GPIOD_LINE_VALUE_ACTIVE) ? 1 : 0;
 
     last_activity_.store(now_ms());
-
     running_ = true;
     thread_ = std::thread(&GpioDriver::poll_thread, this);
 
-    fprintf(stderr, "[GPIO] Initialized (shutter=%s, encoder=%s, flash=%s, vib=%s)\n",
-            shutter_line_ ? "ok" : "fail",
-            enc_clk_line_ ? "ok" : "fail",
-            flash_line_ ? "ok" : "fail",
-            vibrate_line_ ? "ok" : "fail");
+    fprintf(stderr, "[GPIO] Initialized (libgpiod v2.x)\n");
     return true;
 }
 
@@ -121,19 +124,21 @@ void GpioDriver::deinit() {
     running_ = false;
     if (thread_.joinable()) thread_.join();
 
-    if (flash_line_) {
-        gpiod_line_set_value(flash_line_, 0);
-        gpiod_line_release(flash_line_);
+    // Release output request (turns off outputs first)
+    if (output_req_) {
+        gpiod_line_request_set_value(output_req_, 0, GPIOD_LINE_VALUE_INACTIVE);  // flash
+        gpiod_line_request_set_value(output_req_, 1, GPIOD_LINE_VALUE_INACTIVE);  // vibrate
+        gpiod_line_request_release(output_req_);
+        output_req_ = nullptr;
     }
-    if (vibrate_line_) {
-        gpiod_line_set_value(vibrate_line_, 0);
-        gpiod_line_release(vibrate_line_);
-    }
-    if (shutter_line_) gpiod_line_release(shutter_line_);
-    if (enc_clk_line_) gpiod_line_release(enc_clk_line_);
-    if (enc_dt_line_)  gpiod_line_release(enc_dt_line_);
-    if (enc_btn_line_) gpiod_line_release(enc_btn_line_);
 
+    // Release input request
+    if (input_req_) {
+        gpiod_line_request_release(input_req_);
+        input_req_ = nullptr;
+    }
+
+    // Close chip
     if (chip_) {
         gpiod_chip_close(chip_);
         chip_ = nullptr;
@@ -141,8 +146,6 @@ void GpioDriver::deinit() {
 }
 
 void GpioDriver::on_shutter(ButtonCallback cb) {
-    // IMPORTANT: Must be called BEFORE init() or while poll thread is not running
-    // to avoid data race on std::function
     shutter_cb_ = std::move(cb);
 }
 
@@ -155,20 +158,22 @@ void GpioDriver::on_encoder_rotate(EncoderCallback cb) {
 }
 
 void GpioDriver::set_flash(bool on) {
-    if (flash_line_) {
-        gpiod_line_set_value(flash_line_, on ? 1 : 0);
+    if (output_req_) {
+        enum gpiod_line_value val = on ? GPIOD_LINE_VALUE_ACTIVE : GPIOD_LINE_VALUE_INACTIVE;
+        gpiod_line_request_set_value(output_req_, 0, val);  // output line 0 = flash
     }
 }
 
 void GpioDriver::vibrate(int duration_ms) {
-    if (!vibrate_line_ || !running_) return;
-    gpiod_line_set_value(vibrate_line_, 1);
-    // Use a blocking sleep in-place instead of a detached thread
-    // to avoid use-after-free if deinit() is called while sleeping.
-    // Vibrate durations are short (30-50ms), so blocking is acceptable.
+    if (!output_req_ || !running_) return;
+    
+    // Turn on vibration motor (output line 1)
+    gpiod_line_request_set_value(output_req_, 1, GPIOD_LINE_VALUE_ACTIVE);
     usleep(duration_ms * 1000);
-    if (vibrate_line_ && running_) {
-        gpiod_line_set_value(vibrate_line_, 0);
+    
+    // Turn off vibration motor
+    if (output_req_ && running_) {
+        gpiod_line_request_set_value(output_req_, 1, GPIOD_LINE_VALUE_INACTIVE);
     }
 }
 
@@ -177,50 +182,55 @@ uint64_t GpioDriver::last_activity_ms() const {
 }
 
 void GpioDriver::poll_thread() {
-    bool shutter_prev = true;  // pull-up, active low
+    bool shutter_prev = true;   // pull-up: HIGH = not pressed
     bool enc_btn_prev = true;
     int debounce_ms = 50;
     uint64_t shutter_last = 0;
     uint64_t enc_btn_last = 0;
 
     while (running_) {
+        if (!input_req_) break;
+
         uint64_t now = now_ms();
 
-        // Shutter button
-        if (shutter_line_) {
-            int val = gpiod_line_get_value(shutter_line_);
-            bool pressed = (val == 0);  // active low
-            if (pressed && !shutter_prev && (now - shutter_last > debounce_ms)) {
-                shutter_last = now;
-                last_activity_.store(now);
-                if (shutter_cb_) shutter_cb_();
-            }
-            shutter_prev = pressed;
+        // Read all input lines at once (more efficient than individual reads)
+        enum gpiod_line_value values[4];
+        int ret = gpiod_line_request_get_values(input_req_, values);
+        if (ret != 0) {
+            usleep(2000);
+            continue;
         }
 
-        // Encoder button
-        if (enc_btn_line_) {
-            int val = gpiod_line_get_value(enc_btn_line_);
-            bool pressed = (val == 0);
-            if (pressed && !enc_btn_prev && (now - enc_btn_last > debounce_ms)) {
-                enc_btn_last = now;
-                last_activity_.store(now);
-                if (enc_btn_cb_) enc_btn_cb_();
-            }
-            enc_btn_prev = pressed;
+        // Process input line 0: shutter button (active-low)
+        bool shutter_active = (values[0] == GPIOD_LINE_VALUE_ACTIVE);
+        bool shutter_pressed = !shutter_active;  // inverted: active=pressed in our logic
+        if (shutter_pressed && !shutter_prev && (now - shutter_last > debounce_ms)) {
+            shutter_last = now;
+            last_activity_.store(now);
+            if (shutter_cb_) shutter_cb_();
         }
+        shutter_prev = shutter_pressed;
 
-        // Rotary encoder
-        if (enc_clk_line_ && enc_dt_line_) {
-            int clk = gpiod_line_get_value(enc_clk_line_);
-            if (clk != enc_last_clk_ && clk == 0) {
-                int dt = gpiod_line_get_value(enc_dt_line_);
-                int dir = (dt != clk) ? +1 : -1;
-                last_activity_.store(now);
-                if (enc_rot_cb_) enc_rot_cb_(dir);
-            }
-            enc_last_clk_ = clk;
+        // Process input line 3: encoder button (active-low)
+        bool enc_btn_active = (values[3] == GPIOD_LINE_VALUE_ACTIVE);
+        bool enc_btn_pressed = !enc_btn_active;
+        if (enc_btn_pressed && !enc_btn_prev && (now - enc_btn_last > debounce_ms)) {
+            enc_btn_last = now;
+            last_activity_.store(now);
+            if (enc_btn_cb_) enc_btn_cb_();
         }
+        enc_btn_prev = enc_btn_pressed;
+
+        // Process rotary encoder: line 1 = CLK, line 2 = DT
+        int clk = (values[1] == GPIOD_LINE_VALUE_ACTIVE) ? 1 : 0;
+        int dt = (values[2] == GPIOD_LINE_VALUE_ACTIVE) ? 1 : 0;
+
+        if (clk != enc_last_clk_ && clk == 0) {
+            int dir = (dt != clk) ? +1 : -1;
+            last_activity_.store(now);
+            if (enc_rot_cb_) enc_rot_cb_(dir);
+        }
+        enc_last_clk_ = clk;
 
         usleep(2000);  // 2ms poll interval
     }

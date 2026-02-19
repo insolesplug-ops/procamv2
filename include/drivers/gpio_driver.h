@@ -1,6 +1,6 @@
 #pragma once
 /**
- * CinePi Camera - GPIO Driver (libgpiod)
+ * CinePi Camera - GPIO Driver (libgpiod v2.x)
  * Handles shutter button, encoder, vibration motor, LED flash.
  */
 
@@ -10,7 +10,7 @@
 #include <functional>
 
 struct gpiod_chip;
-struct gpiod_line;
+struct gpiod_line_request;
 
 namespace cinepi {
 
@@ -41,12 +41,8 @@ private:
     void poll_thread();
 
     gpiod_chip* chip_ = nullptr;
-    gpiod_line* shutter_line_ = nullptr;
-    gpiod_line* enc_clk_line_ = nullptr;
-    gpiod_line* enc_dt_line_  = nullptr;
-    gpiod_line* enc_btn_line_ = nullptr;
-    gpiod_line* flash_line_   = nullptr;
-    gpiod_line* vibrate_line_ = nullptr;
+    gpiod_line_request* input_req_ = nullptr;   // Shutter, Enc CLK/DT, Enc Button
+    gpiod_line_request* output_req_ = nullptr;  // Flash LED, Vibration Motor
 
     std::thread thread_;
     std::atomic<bool> running_{false};
