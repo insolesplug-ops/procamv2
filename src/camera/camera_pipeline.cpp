@@ -55,8 +55,9 @@ bool CameraPipeline::init() {
     stream_cfg.pixelFormat = formats::RGB888;
     stream_cfg.bufferCount = CAMERA_BUF_COUNT;
 
-    // Apply rotation for portrait mode
-    config_->transform = Transform::Rot90;
+    // Portrait rotation handled by DRM display driver
+    // Not setting cam config transform - may not be available in all libcamera versions
+    // config_->transform = Transform::Rot90;
 
     CameraConfiguration::Status status = config_->validate();
     if (status == CameraConfiguration::Invalid) {

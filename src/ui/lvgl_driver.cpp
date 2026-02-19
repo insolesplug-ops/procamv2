@@ -103,8 +103,8 @@ void LvglDriver::resume() {
     paused_ = false;
 }
 
-void LvglDriver::flush_cb(lv_disp_drv_t* drv, const lv_area_t* area,
-                           lv_color_t* color_p) {
+void LvglDriver::flush_cb(struct _lv_disp_drv_t* drv, const struct _lv_area_t* area,
+                           struct _lv_color_t* color_p) {
     if (!g_display) {
         lv_disp_flush_ready(drv);
         return;
@@ -157,7 +157,7 @@ void LvglDriver::flush_cb(lv_disp_drv_t* drv, const lv_area_t* area,
     lv_disp_flush_ready(drv);
 }
 
-void LvglDriver::input_read_cb(lv_indev_drv_t* drv, lv_indev_data_t* data) {
+void LvglDriver::input_read_cb(struct _lv_indev_drv_t* drv, struct _lv_indev_data_t* data) {
     if (!g_touch) {
         data->state = LV_INDEV_STATE_REL;
         return;
